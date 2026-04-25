@@ -1,0 +1,14 @@
+[project]
+name = "nomad"
+version = "0.1.0"
+description = "Multi-agent system for trip planning"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "crawl4ai>=0.8.6",
+    "fast-flights>=2.2",
+    "flights>=0.8.4",
+    "langchain>=1.2.15",
+    "langgraph>=1.1.9",
+    "langgraph-cli>=0.4.24",
+]
