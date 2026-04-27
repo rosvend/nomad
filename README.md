@@ -5,15 +5,14 @@ Multi-agent travel planning system built with LangGraph that automates end-to-en
 ## Repo Structure
 
 ```
-nomad/
-├── config.py               # Settings (pydantic-settings), provider factory
+nomad/            
 ├── state/
 │   └── trip_state.py       # TripState TypedDict — the contract between all agents
 ├── agents/                 # One file per agent
 ├── graph/
 │   ├── builder.py          # Assembles the StateGraph
-│   └── edges.py            # Conditional edge logic, fallback routing
-├── tools/                  # LangGraph tool wrappers (quota-aware, error-safe)
+│   └── edges.py            # Conditional edge logic
+├── tools/                  
 └── output/
     ├── schemas.py          # Pydantic output models
     └── formatter.py        # TravelPlan → markdown / JSON
@@ -25,13 +24,11 @@ nomad/
 |---|---|---|
 | Orchestration | LangGraph | — |
 | LLM | Ollama (local) | Gemini free tier |
-| Web search | SearXNG (self-hosted)/Crawl4AI | Tavily |
-| Flight data | `fast-flights` (no key) | SerpApi |
+| Web search | SearXNG/Crawl4AI | Tavily |
+| Flight data | `fli`/`fast-flights`| SerpApi |
 | Places/reviews | Google Maps Grounding Lite | — |
-| Logistics/routing | Google Maps Directions API | — |
-| Deep scraping | Crawl4AI | — |
+| Logistics/routing | OpenStreetMap/Overpass | Google Maps Directions API |
 | Package manager | `uv` | — |
-| Infra (local) | Docker Compose (SearXNG + Ollama) | — |
 
 ## How to run
 
@@ -40,6 +37,30 @@ nomad/
 * Python +3.11 
 * uv (package manager)
 
-### Copy .env.example to your .env 
-
 ### Quick start
+
+```bash
+# 1. install dependencies
+uv sync
+
+# 2. seed your env (defaults point at local Ollama + SearXNG; no signup required)
+cp .env.example .env
+
+# 3. run the planner
+uv run python -m src.main "Plan a 5-day trip to Tokyo"
+```
+
+The default config talks to a local Ollama (`http://localhost:11434`,
+model `gemma3:12b`). To switch to Gemini's free tier, set `GEMINI_API_KEY`
+in `.env` — the provider factory in `src/config.py` will pick it up
+automatically.
+
+### Visualize the graph
+
+```bash
+uv run langgraph dev
+```
+
+This opens LangGraph Studio against the compiled graph from
+`src/graph/builder.py:build_graph` so you can step through agent
+execution interactively.
