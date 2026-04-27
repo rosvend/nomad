@@ -29,13 +29,24 @@ class Flight(BaseModel):
 class Hotel(BaseModel):
     name: str
     address: str | None = None
-    rating: float | None = None  # 0.0 - 5.0
+    rating: float | None = None  # 0.0 - 5.0 (Google's user rating)
+    review_count: int | None = None  # number of Google reviews
+    price_level: int | None = None  # Google's 0-4 scale (0=free, 4=very expensive)
+    lat: float | None = None
+    lon: float | None = None
     nightly_price: float | None = None
     currency: str = "USD"
     check_in: date | None = None
     check_out: date | None = None
     booking_url: str | None = None
+    website: str | None = None
     amenities: list[str] = Field(default_factory=list)
+    # Composite ranking score (0.0-1.0) computed by the Hotel agent.
+    score: float | None = None
+    # Per-component scores (rating / popularity / proximity / budget) for
+    # transparency on why a hotel was ranked where it was.
+    score_breakdown: dict[str, float] | None = None
+    notes: str | None = None
 
 
 class Restaurant(BaseModel):

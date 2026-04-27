@@ -30,7 +30,7 @@ def to_markdown(plan: TravelPlan) -> str:
     lines.append("")
 
     lines.append("## Hotels")
-    lines.append(_section(plan.hotels, "No hotels found."))
+    lines.append(_hotels_section(plan.hotels))
     lines.append("")
 
     lines.append("## Restaurants")
@@ -57,3 +57,42 @@ def _section(items: list, empty_msg: str) -> str:
     if not items:
         return f"_{empty_msg}_"
     return "\n".join(f"- `{json.dumps(item.model_dump(mode='json'))}`" for item in items)
+
+
+def _hotels_section(hotels: list) -> str:
+    """Human-readable hotel listing (the other sections stay JSON until
+    their agents are filled in)."""
+    if not hotels:
+        return "_No hotels found._"
+
+    lines: list[str] = []
+    for i, h in enumerate(hotels, 1):
+        meta_parts: list[str] = []
+        if h.rating is not None:
+            meta_parts.append(f"{h.rating}★")
+        if h.review_count:
+            meta_parts.append(f"{h.review_count:,} reviews")
+        if h.price_level is not None:
+            meta_parts.append("$" * max(1, h.price_level))
+        if h.score is not None:
+            meta_parts.append(f"score {h.score:.2f}")
+        meta = "  ·  ".join(meta_parts) if meta_parts else "—"
+
+        lines.append(f"### {i}. {h.name}")
+        lines.append(f"_{meta}_")
+        if h.address:
+            lines.append(f"📍 {h.address}")
+        if h.website:
+            lines.append(f"🔗 {h.website}")
+        if h.score_breakdown:
+            sb = h.score_breakdown
+            lines.append(
+                f"`rating={sb.get('rating', 0):.2f}  "
+                f"popularity={sb.get('popularity', 0):.2f}  "
+                f"proximity={sb.get('proximity', 0):.2f}  "
+                f"budget={sb.get('budget', 0):.2f}`"
+            )
+        if h.notes:
+            lines.append(f"> {h.notes}")
+        lines.append("")
+    return "\n".join(lines)
