@@ -26,9 +26,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 from typing import Any
 
+from src.agents._scoring import (
+    budget_match_score,
+    popularity_score,
+    proximity_score,
+    rating_score,
+)
 from src.state.trip_state import TripState
 from src.tools import geocode, get_reviews, search_pois
 
@@ -41,7 +46,6 @@ ATTRACTION_RADIUS_M = 5000      # tourist attractions can be a bit further
 MAX_CANDIDATES = 8              # cap on Overpass hotel results we consider
 MAX_ENRICHED = 6                # cap on Places API enrichment (cost = 2 each)
 MIN_RESULTS = 3                 # always return at least this many
-PROXIMITY_TOP_K = 5             # average distance to top-K nearest attractions
 
 # Composite-score weights (must sum to 1.0).
 W_RATING = 0.30
@@ -49,74 +53,11 @@ W_POPULARITY = 0.20
 W_PROXIMITY = 0.30
 W_BUDGET = 0.20
 
-# Budget tier → preferred Google `price_level` range (1=$ … 4=$$$$).
-_BUDGET_PRICE_PREFS: dict[str, tuple[int, int]] = {
-    "budget": (1, 2),
-    "mid": (2, 3),
-    "luxury": (3, 4),
-}
-
-# Proximity score: 1.0 within this radius (km); 0.0 beyond `_PROX_FAR_KM`.
+# Proximity-curve parameters: hotels can be a bit further from attractions
+# than restaurants, since you commute from them once or twice a day.
 _PROX_NEAR_KM = 1.0
 _PROX_FAR_KM = 5.0
-
-
-# ── Geometry / scoring helpers ───────────────────────────────────────
-
-def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Great-circle distance between two (lat, lon) points, in km."""
-    rad = math.pi / 180
-    dlat = (lat2 - lat1) * rad
-    dlon = (lon2 - lon1) * rad
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(lat1 * rad) * math.cos(lat2 * rad) * math.sin(dlon / 2) ** 2
-    )
-    return 6371.0 * 2 * math.asin(math.sqrt(a))
-
-
-def _proximity_score(
-    hotel: tuple[float, float] | None,
-    attractions: list[tuple[float, float]],
-) -> float:
-    """0.0 (far) … 1.0 (close to attraction cluster). 0.5 when undefined."""
-    if hotel is None or not attractions:
-        return 0.5
-    distances = sorted(
-        _haversine_km(hotel[0], hotel[1], a[0], a[1]) for a in attractions
-    )
-    top = distances[:PROXIMITY_TOP_K]
-    mean_d = sum(top) / len(top)
-    if mean_d <= _PROX_NEAR_KM:
-        return 1.0
-    if mean_d >= _PROX_FAR_KM:
-        return 0.0
-    return 1.0 - (mean_d - _PROX_NEAR_KM) / (_PROX_FAR_KM - _PROX_NEAR_KM)
-
-
-def _popularity_score(review_count: int | None) -> float:
-    """Log-scaled: 1 review ≈ 0, 1k+ reviews ≈ 1."""
-    if not review_count or review_count <= 0:
-        return 0.0
-    return max(0.0, min(1.0, math.log10(review_count) / 3.0))
-
-
-def _budget_match_score(price_level: int | None, budget_tier: str) -> float:
-    """1.0 if price_level in tier's preferred range, 0.5 if adjacent, 0.0 otherwise."""
-    if price_level is None:
-        return 0.5  # neutral when Google doesn't know
-    lo, hi = _BUDGET_PRICE_PREFS.get(budget_tier, (2, 3))
-    if lo <= price_level <= hi:
-        return 1.0
-    if price_level == lo - 1 or price_level == hi + 1:
-        return 0.5
-    return 0.0
-
-
-def _rating_score(rating: float | None) -> float:
-    if rating is None:
-        return 0.5  # neutral
-    return max(0.0, min(1.0, rating / 5.0))
+_PROX_TOP_K = 5
 
 
 # ── Enrichment ───────────────────────────────────────────────────────
@@ -286,10 +227,16 @@ async def hotel_agent(state: TripState) -> dict:
             if c.get("lat") is not None and c.get("lon") is not None
             else None
         )
-        rating_n = _rating_score(c.get("rating"))
-        pop_n = _popularity_score(c.get("review_count"))
-        prox_n = _proximity_score(pos, attraction_positions)
-        budget_n = _budget_match_score(c.get("price_level"), budget_tier)
+        rating_n = rating_score(c.get("rating"))
+        pop_n = popularity_score(c.get("review_count"))
+        prox_n = proximity_score(
+            pos,
+            attraction_positions,
+            near_km=_PROX_NEAR_KM,
+            far_km=_PROX_FAR_KM,
+            top_k=_PROX_TOP_K,
+        )
+        budget_n = budget_match_score(c.get("price_level"), budget_tier)
 
         composite = (
             W_RATING * rating_n

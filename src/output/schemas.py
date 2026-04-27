@@ -51,10 +51,18 @@ class Hotel(BaseModel):
 
 class Restaurant(BaseModel):
     name: str
-    cuisine: str | None = None
+    cuisine: str | None = None  # raw OSM cuisine string, e.g. "ramen;japanese"
     address: str | None = None
-    rating: float | None = None
-    price_level: Literal["$", "$$", "$$$", "$$$$"] | None = None
+    rating: float | None = None  # 0.0 - 5.0 (Google's user rating)
+    review_count: int | None = None
+    price_level: int | None = None  # Google's 0-4 scale (0=free, 4=very expensive)
+    lat: float | None = None
+    lon: float | None = None
+    website: str | None = None
+    amenities: list[str] = Field(default_factory=list)  # e.g. "outdoor seating"
+    # Composite ranking score (0.0-1.0) computed by the Food agent.
+    score: float | None = None
+    score_breakdown: dict[str, float] | None = None
     notes: str | None = None
 
 

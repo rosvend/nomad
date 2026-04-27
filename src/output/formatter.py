@@ -34,7 +34,7 @@ def to_markdown(plan: TravelPlan) -> str:
     lines.append("")
 
     lines.append("## Restaurants")
-    lines.append(_section(plan.restaurants, "No restaurants found."))
+    lines.append(_restaurants_section(plan.restaurants))
     lines.append("")
 
     lines.append("## Itinerary")
@@ -94,5 +94,48 @@ def _hotels_section(hotels: list) -> str:
             )
         if h.notes:
             lines.append(f"> {h.notes}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _restaurants_section(restaurants: list) -> str:
+    """Human-readable restaurant listing, parallel to `_hotels_section`."""
+    if not restaurants:
+        return "_No restaurants found._"
+
+    lines: list[str] = []
+    for i, r in enumerate(restaurants, 1):
+        meta_parts: list[str] = []
+        if r.rating is not None:
+            meta_parts.append(f"{r.rating}★")
+        if r.review_count:
+            meta_parts.append(f"{r.review_count:,} reviews")
+        if r.price_level is not None:
+            meta_parts.append("$" * max(1, r.price_level))
+        if r.score is not None:
+            meta_parts.append(f"score {r.score:.2f}")
+        meta = "  ·  ".join(meta_parts) if meta_parts else "—"
+
+        lines.append(f"### {i}. {r.name}")
+        lines.append(f"_{meta}_")
+        if r.cuisine:
+            lines.append(f"🍴 {r.cuisine}")
+        if r.address:
+            lines.append(f"📍 {r.address}")
+        if r.website:
+            lines.append(f"🔗 {r.website}")
+        if r.amenities:
+            lines.append(f"_amenities: {', '.join(r.amenities)}_")
+        if r.score_breakdown:
+            sb = r.score_breakdown
+            lines.append(
+                f"`rating={sb.get('rating', 0):.2f}  "
+                f"popularity={sb.get('popularity', 0):.2f}  "
+                f"proximity={sb.get('proximity', 0):.2f}  "
+                f"cuisine={sb.get('cuisine', 0):.2f}  "
+                f"budget={sb.get('budget', 0):.2f}`"
+            )
+        if r.notes:
+            lines.append(f"> {r.notes}")
         lines.append("")
     return "\n".join(lines)
