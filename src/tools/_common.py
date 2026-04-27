@@ -14,6 +14,7 @@ agents copy into `state["errors"]` when something goes wrong. Tools
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, TypedDict
 
@@ -25,6 +26,20 @@ log = logging.getLogger("src.tools")
 
 DEFAULT_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 USER_AGENT = "nomad-travel-planner/0.1 (https://github.com/rosvend/nomad)"
+
+# Strip API keys from any string headed for a log or error_result. Most
+# Google APIs auth via `?key=AIza...` query param; httpx exception messages
+# echo the full URL, which means an unredacted error leaks the key into
+# the conversation. Redact aggressively.
+_KEY_RE = re.compile(
+    r"(?P<param>(?:^|[?&\s])(?:key|api[_-]?key|apikey))=[A-Za-z0-9_\-]+",
+    re.IGNORECASE,
+)
+
+
+def redact(s: str) -> str:
+    """Replace `key=...` / `api_key=...` patterns with `key=REDACTED`."""
+    return _KEY_RE.sub(lambda m: f"{m.group('param')}=REDACTED", s)
 
 
 class ToolSuccess(TypedDict):
@@ -88,11 +103,12 @@ async def safe_call(
     try:
         return await fn()
     except httpx.HTTPError as e:
-        log.warning("network error calling %s: %s", provider, e)
-        return error_result(provider, "network_error", str(e))
+        msg = redact(str(e))
+        log.warning("network error calling %s: %s", provider, msg)
+        return error_result(provider, "network_error", msg)
     except Exception as e:  # noqa: BLE001 — last-resort guard, see CLAUDE.md
         log.exception("unexpected error in tool %s", provider)
-        return error_result(provider, "provider_error", str(e))
+        return error_result(provider, "provider_error", redact(str(e)))
 
 
 async def with_quota(

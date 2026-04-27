@@ -38,6 +38,11 @@ class Settings(BaseSettings):
 
     # --- quotas (monthly) ---
     serpapi_monthly_limit: int = 250
+    # Google Maps Platform $200/mo credit covers ~10k calls; we cap at 8k
+    # to leave headroom for non-reviews Maps usage. Each `get_reviews` call
+    # consumes 2 Places API requests (findplace + details), so 8k = ~4k
+    # reviews lookups per month.
+    google_places_monthly_limit: int = 8000
     google_maps_grounding_monthly_limit: int = 10000
     tavily_monthly_limit: int = 1000
 

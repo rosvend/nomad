@@ -46,9 +46,19 @@ uv sync
 # 2. seed your env (defaults point at local Ollama + SearXNG; no signup required)
 cp .env.example .env
 
-# 3. run the planner
+# 3. (optional, for web search) start a local SearXNG
+docker compose up -d searxng
+
+# 4. (optional, for JS-rendered page fetching) install Playwright's Chromium
+uv run playwright install chromium
+
+# 5. run the planner
 uv run python -m src.main "Plan a 5-day trip to Tokyo"
 ```
+
+Steps 3 and 4 are only needed when the agents actually call `web_search`
+or `fetch_page(render=True)`. Skip them for a flights-only / places-only
+run.
 
 The default config talks to a local Ollama (`http://localhost:11434`,
 model `gemma3:12b`). To switch to Gemini's free tier, set `GEMINI_API_KEY`

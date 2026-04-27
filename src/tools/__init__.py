@@ -10,6 +10,7 @@ from src.tools._common import ToolError, ToolResult, ToolSuccess
 from src.tools.flights import search_flights
 from src.tools.places import geocode, search_places, search_pois
 from src.tools.quota import QuotaExceededError, quota_tracker
+from src.tools.reviews import get_grounded_summary, get_reviews
 from src.tools.routing import get_route
 from src.tools.web_fetch import fetch_page
 from src.tools.web_search import web_search
@@ -19,6 +20,8 @@ ALL_TOOLS = [
     geocode,
     search_pois,
     search_places,
+    get_reviews,
+    get_grounded_summary,
     get_route,
     web_search,
     fetch_page,
@@ -32,6 +35,8 @@ __all__ = [
     "ToolSuccess",
     "fetch_page",
     "geocode",
+    "get_grounded_summary",
+    "get_reviews",
     "get_route",
     "quota_tracker",
     "search_flights",

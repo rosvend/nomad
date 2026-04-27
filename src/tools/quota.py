@@ -39,6 +39,7 @@ class QuotaTracker:
         return {
             "serpapi": s.serpapi_monthly_limit,
             "tavily": s.tavily_monthly_limit,
+            "google_places": s.google_places_monthly_limit,
             "google_maps_grounding": s.google_maps_grounding_monthly_limit,
         }.get(provider)
 
