@@ -4,11 +4,6 @@
 updates to. LangGraph merges those partial updates into the running state
 according to each field's reducer (default: overwrite; lists use additive
 reducers so parallel specialists can each contribute results).
-
-Rules (see CLAUDE.md):
-- All output fields are Optional with a None / empty default.
-- Agents return a dict of *only* the keys they update — never mutate state.
-- Add the field here before any agent code references it.
 """
 
 from __future__ import annotations

@@ -208,3 +208,7 @@ __marimo__/
 
 #CLAUDE.md
 CLAUDE.md
+
+#langgraph
+*.pckl
+*.pkl
