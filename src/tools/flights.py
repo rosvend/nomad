@@ -128,22 +128,45 @@ async def _search_flights_fli(
     return await safe_call("fli", _call)
 
 
-def _normalize_fli_flight(r: Any) -> dict[str, Any]:
-    """Map a Fli `FlightResult` into the shape of `output.schemas.Flight`."""
+def _ap_code(ap: Any) -> str | None:
+    if ap is None:
+        return None
+    return ap.name if hasattr(ap, "name") else str(ap)
+
+
+def _airline_name(a: Any) -> str | None:
+    if a is None:
+        return None
+    return a.value if hasattr(a, "value") else str(a)
+
+
+def _leg_dict(leg: Any, leg_type: str | None = None) -> dict[str, Any]:
+    d: dict[str, Any] = {
+        "airline": _airline_name(leg.airline),
+        "flight_number": getattr(leg, "flight_number", None),
+        "from": _ap_code(leg.departure_airport),
+        "to": _ap_code(leg.arrival_airport),
+        "depart_at": (
+            leg.departure_datetime.isoformat()
+            if leg.departure_datetime
+            else None
+        ),
+        "arrive_at": (
+            leg.arrival_datetime.isoformat()
+            if leg.arrival_datetime
+            else None
+        ),
+        "duration_minutes": getattr(leg, "duration", None),
+    }
+    if leg_type:
+        d["leg_type"] = leg_type
+    return d
+
+
+def _normalize_one_way(r: Any) -> dict[str, Any]:
     legs = list(r.legs or [])
     first = legs[0] if legs else None
     last = legs[-1] if legs else None
-
-    def _ap_code(ap: Any) -> str | None:
-        if ap is None:
-            return None
-        return ap.name if hasattr(ap, "name") else str(ap)
-
-    def _airline_name(a: Any) -> str | None:
-        if a is None:
-            return None
-        return a.value if hasattr(a, "value") else str(a)
-
     return {
         "airline": _airline_name(first.airline) if first else None,
         "flight_number": getattr(first, "flight_number", None) if first else None,
@@ -163,27 +186,68 @@ def _normalize_fli_flight(r: Any) -> dict[str, Any]:
         "stops": getattr(r, "stops", 0),
         "price": getattr(r, "price", None),
         "currency": getattr(r, "currency", None),
+        "trip_type": "one-way",
+        "legs": [_leg_dict(leg) for leg in legs],
+    }
+
+
+def _normalize_round_trip(outbound: Any, ret: Any) -> dict[str, Any]:
+    """Combine an (outbound, return) FlightResult pair into one Flight dict.
+
+    Fli returns round-trip results as `list[tuple[FlightResult, FlightResult]]`
+    where both halves carry the same total trip price. We surface the
+    outbound's depart/arrive (the user's primary leg) and stash the return
+    in `legs` tagged `leg_type="return"` so renderers can group them.
+    """
+    out_legs = list(outbound.legs or [])
+    ret_legs = list(ret.legs or [])
+    out_first = out_legs[0] if out_legs else None
+    out_last = out_legs[-1] if out_legs else None
+    return {
+        "airline": _airline_name(out_first.airline) if out_first else None,
+        "flight_number": getattr(out_first, "flight_number", None) if out_first else None,
+        "origin": _ap_code(out_first.departure_airport) if out_first else None,
+        "destination": _ap_code(out_last.arrival_airport) if out_last else None,
+        "depart_at": (
+            out_first.departure_datetime.isoformat()
+            if out_first and out_first.departure_datetime
+            else None
+        ),
+        "arrive_at": (
+            out_last.arrival_datetime.isoformat()
+            if out_last and out_last.arrival_datetime
+            else None
+        ),
+        "duration_minutes": (
+            (getattr(outbound, "duration", 0) or 0)
+            + (getattr(ret, "duration", 0) or 0)
+        ),
+        "stops": max(
+            getattr(outbound, "stops", 0) or 0,
+            getattr(ret, "stops", 0) or 0,
+        ),
+        "price": getattr(outbound, "price", None),  # Fli reports same on both
+        "currency": getattr(outbound, "currency", None),
+        "trip_type": "round-trip",
         "legs": [
-            {
-                "airline": _airline_name(leg.airline),
-                "flight_number": getattr(leg, "flight_number", None),
-                "from": _ap_code(leg.departure_airport),
-                "to": _ap_code(leg.arrival_airport),
-                "depart_at": (
-                    leg.departure_datetime.isoformat()
-                    if leg.departure_datetime
-                    else None
-                ),
-                "arrive_at": (
-                    leg.arrival_datetime.isoformat()
-                    if leg.arrival_datetime
-                    else None
-                ),
-                "duration_minutes": getattr(leg, "duration", None),
-            }
-            for leg in legs
+            *[_leg_dict(leg, leg_type="outbound") for leg in out_legs],
+            *[_leg_dict(leg, leg_type="return") for leg in ret_legs],
         ],
     }
+
+
+def _normalize_fli_flight(r: Any) -> dict[str, Any]:
+    """Normalize one Fli result row.
+
+    Fli returns:
+    - one-way searches → `list[FlightResult]` (one per option)
+    - round-trip searches → `list[tuple[FlightResult, FlightResult]]`
+      (outbound + return paired). We collapse the pair into one Flight
+      dict so downstream agents reason about complete trip options.
+    """
+    if isinstance(r, tuple) and len(r) == 2:
+        return _normalize_round_trip(r[0], r[1])
+    return _normalize_one_way(r)
 
 
 async def _search_flights_serpapi(

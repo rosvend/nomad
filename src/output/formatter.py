@@ -26,7 +26,7 @@ def to_markdown(plan: TravelPlan) -> str:
     lines.append("")
 
     lines.append("## Flights")
-    lines.append(_section(plan.flights, "No flights found."))
+    lines.append(_flights_section(plan.flights))
     lines.append("")
 
     lines.append("## Hotels")
@@ -57,6 +57,64 @@ def _section(items: list, empty_msg: str) -> str:
     if not items:
         return f"_{empty_msg}_"
     return "\n".join(f"- `{json.dumps(item.model_dump(mode='json'))}`" for item in items)
+
+
+def _fmt_minutes(mins: int | None) -> str:
+    if not mins:
+        return "—"
+    h, m = divmod(int(mins), 60)
+    return f"{h}h{m:02d}m" if h else f"{m}m"
+
+
+def _fmt_dt(dt) -> str:
+    """Render a datetime field compactly: `2026-05-01 00:05`."""
+    if dt is None:
+        return "—"
+    s = str(dt)
+    # Python datetime → "2026-05-01T00:05:00" or "2026-05-01 00:05:00"
+    return s.replace("T", " ").rsplit(":", 1)[0]
+
+
+def _flights_section(flights: list) -> str:
+    """Human-readable flight listing, parallel to `_hotels_section`."""
+    if not flights:
+        return "_No flights found._"
+
+    lines: list[str] = []
+    for i, f in enumerate(flights, 1):
+        # Header: "1. UA  LAX → HND  ·  2026-05-01 00:05 → 2026-05-02 20:20"
+        airline = f.airline or "—"
+        flight_no = f"  ({f.flight_number})" if f.flight_number else ""
+        route = f"{f.origin or '—'} → {f.destination or '—'}"
+        depart = _fmt_dt(f.depart_at)
+        arrive = _fmt_dt(f.arrive_at)
+        lines.append(f"### {i}. {airline}{flight_no}")
+        lines.append(f"_{route}  ·  {depart} → {arrive}_")
+
+        meta_parts: list[str] = []
+        if f.duration_minutes is not None:
+            meta_parts.append(_fmt_minutes(f.duration_minutes))
+        if f.stops is not None:
+            meta_parts.append("non-stop" if f.stops == 0 else f"{f.stops} stop{'s' if f.stops != 1 else ''}")
+        if f.price is not None:
+            currency = f.currency or ""
+            meta_parts.append(f"{f.price:.0f} {currency}".strip())
+        if f.score is not None:
+            meta_parts.append(f"score {f.score:.2f}")
+        if meta_parts:
+            lines.append(f"_{'  ·  '.join(meta_parts)}_")
+
+        if f.score_breakdown:
+            sb = f.score_breakdown
+            lines.append(
+                f"`price={sb.get('price', 0):.2f}  "
+                f"stops={sb.get('stops', 0):.2f}  "
+                f"duration={sb.get('duration', 0):.2f}`"
+            )
+        if f.notes:
+            lines.append(f"> {f.notes}")
+        lines.append("")
+    return "\n".join(lines)
 
 
 def _hotels_section(hotels: list) -> str:

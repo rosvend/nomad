@@ -14,16 +14,26 @@ from pydantic import BaseModel, Field
 
 
 class Flight(BaseModel):
-    airline: str
+    # All optional because Fli/SerpApi can return partial data; the synthesizer
+    # surfaces what it has rather than dropping the row when (e.g.) Fli could
+    # parse the airline but not the flight number.
+    airline: str | None = None
     flight_number: str | None = None
-    origin: str  # IATA airport code
-    destination: str
-    depart_at: datetime
-    arrive_at: datetime
+    origin: str | None = None  # IATA airport code
+    destination: str | None = None
+    depart_at: datetime | None = None
+    arrive_at: datetime | None = None
+    duration_minutes: int | None = None
     price: float | None = None
-    currency: str = "USD"
-    booking_url: str | None = None
+    currency: str | None = None
     stops: int = 0
+    # Per-segment breakdown for multi-leg trips (e.g. round-trips with stops).
+    legs: list[dict] = Field(default_factory=list)
+    booking_url: str | None = None
+    # Composite ranking score (0.0-1.0) computed by the Flight agent.
+    score: float | None = None
+    score_breakdown: dict[str, float] | None = None
+    notes: str | None = None
 
 
 class Hotel(BaseModel):

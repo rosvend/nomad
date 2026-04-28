@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     # --- places ---
     google_maps_api_key: str | None = None
 
+    # --- flight defaults ---
+    # Free-form origin (city name or 3-letter IATA) used by the Flight agent
+    # when state["origin"] isn't populated by the Router. Without this, the
+    # Flight agent has no idea where you're flying from and returns a
+    # graceful no-op error.
+    default_origin: str | None = None
+
     # --- quotas (monthly) ---
     serpapi_monthly_limit: int = 250
     # Google Maps Platform $200/mo credit covers ~10k calls; we cap at 8k

@@ -19,6 +19,7 @@ class TripState(TypedDict, total=False):
     raw_query: str  # the user's natural-language request
 
     # --- parsed intent (Router writes) ---
+    origin: str | None  # free-form city name or 3-letter IATA — Flight agent resolves
     destination: str | None
     dates: dict[str, str] | None  # {"start": "2026-05-01", "end": "2026-05-08"}
     travelers: int | None
