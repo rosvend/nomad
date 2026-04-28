@@ -46,24 +46,41 @@ uv sync
 # 2. seed your env (defaults point at local Ollama + SearXNG; no signup required)
 cp .env.example .env
 
-# 3. (optional, for web search) start a local SearXNG
+# 3. pull the local LLM (safety-net required; configured default optional)
+ollama pull llama3.1:8b      # safety-net fallback — required
+ollama pull gemma3:12b       # configured default — optional, skip if disk-constrained
+
+# 4. (optional, for web search) start a local SearXNG
 docker compose up -d searxng
 
-# 4. (optional, for JS-rendered page fetching) install Playwright's Chromium
+# 5. (optional, for JS-rendered page fetching) install Playwright's Chromium
 uv run playwright install chromium
 
-# 5. run the planner
-uv run python -m src.main "Plan a 5-day trip to Tokyo"
+# 6. run the planner
+uv run python -m src.main "Plan a 5-day trip to Tokyo from LAX"
 ```
 
-Steps 3 and 4 are only needed when the agents actually call `web_search`
+Steps 4 and 5 are only needed when the agents actually call `web_search`
 or `fetch_page(render=True)`. Skip them for a flights-only / places-only
 run.
 
+### What needs a key?
+
+Every `.env` field is optional. The table below shows what each one
+unlocks and how the system degrades when it's blank.
+
+| `.env` field | Unlocks | If blank |
+|---|---|---|
+| `DEFAULT_ORIGIN` | Flight search when the user query has no "from X" | Flight section is empty (not an error) |
+| `GEMINI_API_KEY` | Faster, higher-quality Router & Synthesizer LLM calls | All LLM work goes to local Ollama |
+| `GOOGLE_MAPS_API_KEY` | Real ratings + review counts in hotel & restaurant ranking | Ranking still works via OSM/Overpass; rating signal absent |
+| `TAVILY_API_KEY` / `SERPAPI_API_KEY` | Hosted web search & flight fallback | Falls back to SearXNG (if up) or returns no results |
+
 The default config talks to a local Ollama (`http://localhost:11434`,
-model `gemma3:12b`). To switch to Gemini's free tier, set `GEMINI_API_KEY`
-in `.env` — the provider factory in `src/config.py` will pick it up
-automatically.
+model `gemma3:12b`, with `llama3.1:8b` as a safety net). Setting
+`GEMINI_API_KEY` flips the LLM chain to Gemini first, with the local
+Ollama models still available as automatic fallbacks on quota / network
+errors.
 
 ### Visualize the graph
 
