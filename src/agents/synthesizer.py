@@ -1,5 +1,17 @@
 """Synthesizer — joins specialist outputs into a single TravelPlan.
 
+Pipeline:
+1. Validate every specialist list against its Pydantic model. Bad rows
+   go into `errors[]` rather than crashing the synthesis.
+2. Extract attraction names from `state["logistics"]` (the Logistics
+   agent is the only place attractions live today — it queried Overpass
+   while computing routes from the hotel).
+3. Build an algorithmic itinerary distributing restaurants + attractions
+   across the trip's days at stable times. Pure function in
+   `_itinerary.build_itinerary`.
+4. Optionally call the LLM for a narrative summary paragraph. Failure
+   here is graceful — the plan just renders without a summary.
+
 Reads:  every field
 Writes: final_plan, errors
 """
@@ -11,6 +23,8 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from src.agents._itinerary import build_itinerary
+from src.config import get_llm
 from src.output.schemas import (
     Flight,
     Hotel,
@@ -46,21 +60,118 @@ def _validate_list(
     return valid, errors
 
 
-def synthesizer_agent(state: TripState) -> dict:
-    """Assemble the final plan from whatever the specialists returned.
+def _attractions_from_logistics(
+    logistics: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Pull deduped attraction stops out of logistics legs.
 
-    Partial results are fine: a missing `flights` list yields an empty
-    Flights section in the markdown, not an error. Each specialist list
-    is validated through its Pydantic model so malformed rows are dropped
-    (and recorded under `errors`) rather than crashing the synthesis.
+    Logistics legs have `category` like `"hotel→attraction"` or
+    `"destination→attraction"`. The attraction's name is the leg's
+    `to_stop`. Order of first appearance is preserved (legs come
+    distance-sorted, so closer attractions appear first).
     """
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for leg in logistics or []:
+        cat = leg.get("category") or ""
+        if not cat.endswith("attraction"):
+            continue
+        name = leg.get("to_stop")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append({
+            "name": name,
+            "address": None,
+            "lat": leg.get("to_lat"),
+            "lon": leg.get("to_lon"),
+        })
+    return out
+
+
+_SUMMARY_PROMPT = """\
+Write a concise 3-5 sentence travel summary blurb for the trip described
+below. Mention the destination, dates if present, the chosen hotel, and
+1-2 highlights from the attractions or cuisine. Tone: warm and useful,
+not marketing copy. Plain prose only — no markdown, no bullet points.
+
+Trip:
+- Destination: {destination}
+- Dates: {dates}
+- Travelers: {travelers}
+- Budget tier: {budget_tier}
+- Preferences: {preferences}
+- Top hotel: {top_hotel}
+- Restaurants picked: {n_restaurants} (top: {top_restaurant})
+- Attractions identified: {n_attractions} (top: {top_attraction})
+- Itinerary length: {num_days} day(s)
+"""
+
+
+async def _generate_summary(
+    plan: TravelPlan,
+    itinerary: list[dict[str, Any]],
+    state: TripState,
+) -> str | None:
+    """Best-effort LLM-generated summary. Returns None on any failure."""
+    try:
+        llm = get_llm()
+    except Exception as e:  # noqa: BLE001
+        log.info("synthesizer: skipping summary — LLM unavailable (%s)", e)
+        return None
+
+    days = {stop["day"] for stop in itinerary}
+    top_hotel = plan.hotels[0].name if plan.hotels else "(none chosen)"
+    top_restaurant = plan.restaurants[0].name if plan.restaurants else "—"
+    attractions = _attractions_from_logistics(state.get("logistics"))
+    top_attraction = attractions[0]["name"] if attractions else "—"
+
+    prompt = _SUMMARY_PROMPT.format(
+        destination=plan.destination,
+        dates=plan.dates or "(unspecified)",
+        travelers=plan.travelers,
+        budget_tier=plan.budget_tier or "mid",
+        preferences=", ".join(state.get("preferences") or []) or "(none)",
+        top_hotel=top_hotel,
+        n_restaurants=len(plan.restaurants),
+        top_restaurant=top_restaurant,
+        n_attractions=len(attractions),
+        top_attraction=top_attraction,
+        num_days=len(days) if days else 0,
+    )
+
+    try:
+        resp = await llm.ainvoke(prompt)
+    except Exception as e:  # noqa: BLE001
+        log.warning("synthesizer: summary call failed (%s)", e)
+        return None
+
+    text = resp.content if hasattr(resp, "content") else str(resp)
+    text = text.strip() if isinstance(text, str) else None
+    return text or None
+
+
+async def synthesizer_agent(state: TripState) -> dict:
+    """Assemble the final plan, build itinerary, generate summary."""
     log.info("synthesizer: assembling final plan")
 
     flights, e1 = _validate_list(state.get("flights"), Flight, "flights")
     hotels, e2 = _validate_list(state.get("hotels"), Hotel, "hotels")
     restaurants, e3 = _validate_list(state.get("restaurants"), Restaurant, "restaurants")
-    itinerary, e4 = _validate_list(state.get("itinerary_stops"), ItineraryStop, "itinerary")
     logistics, e5 = _validate_list(state.get("logistics"), LogisticsLeg, "logistics")
+
+    # Itinerary skeleton — algorithmic distribution, no LLM.
+    attractions = _attractions_from_logistics(state.get("logistics"))
+    itinerary_dicts = build_itinerary(
+        dates=state.get("dates"),
+        restaurants=[
+            {"name": r.name, "address": r.address}
+            for r in restaurants
+        ],
+        attractions=attractions,
+        hotel_name=hotels[0].name if hotels else None,
+    )
+    itinerary, e4 = _validate_list(itinerary_dicts, ItineraryStop, "itinerary")
 
     plan = TravelPlan(
         destination=state.get("destination") or "Unknown",
@@ -73,5 +184,13 @@ def synthesizer_agent(state: TripState) -> dict:
         itinerary=itinerary,
         logistics=logistics,
         errors=[*state.get("errors", []), *e1, *e2, *e3, *e4, *e5],
+    )
+
+    # Optional narrative summary on top.
+    plan.summary = await _generate_summary(plan, itinerary_dicts, state)
+
+    log.info(
+        "synthesizer: plan ready — %d itinerary stops, summary=%s",
+        len(itinerary), "yes" if plan.summary else "no",
     )
     return {"final_plan": plan.model_dump(mode="json")}

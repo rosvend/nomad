@@ -64,28 +64,47 @@ def get_settings() -> Settings:
 
 
 def get_llm() -> Any:
-    """Return a configured chat model.
+    """Return a chat model with automatic fallback through a chain.
 
-    Default: local Ollama. If `GEMINI_API_KEY` is set, fall back to Gemini.
-    The actual import is lazy so users without a given provider's package
-    still get a clean error.
+    Order tried (each previous one's failure routes to the next):
+      1. Gemini (only when GEMINI_API_KEY is set).
+      2. Local Ollama with the configured model (`OLLAMA_MODEL`).
+      3. Local Ollama with `llama3.1:8b` — a small, widely-pulled model
+         we use as a last-resort safety net so a missing configured
+         model doesn't take the whole system down.
+
+    LangChain's `with_fallbacks` handles errors transparently — a
+    `429 RESOURCE_EXHAUSTED` on Gemini, a `model not found` on Ollama,
+    or a network error in either case all silently route to the next
+    candidate.
     """
-    settings = get_settings()
-    if settings.gemini_api_key:
-        # Lazy import — keeps `langchain-google-genai` optional.
-        from langchain_google_genai import ChatGoogleGenerativeAI  # type: ignore[import-not-found]
-
-        return ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash",
-            google_api_key=settings.gemini_api_key,
-        )
-
     from langchain_ollama import ChatOllama
 
-    return ChatOllama(
+    settings = get_settings()
+
+    primary_ollama = ChatOllama(
         base_url=settings.ollama_base_url,
         model=settings.ollama_model,
     )
+    safety_net = ChatOllama(
+        base_url=settings.ollama_base_url,
+        model="llama3.1:8b",
+    )
+
+    fallback_chain = [primary_ollama, safety_net] if settings.ollama_model != "llama3.1:8b" else [safety_net]
+
+    if settings.gemini_api_key:
+        try:
+            from langchain_google_genai import ChatGoogleGenerativeAI  # type: ignore[import-not-found]
+        except ImportError:
+            return primary_ollama.with_fallbacks([safety_net])
+        gemini = ChatGoogleGenerativeAI(
+            model="gemini-2.0-flash",
+            google_api_key=settings.gemini_api_key,
+        )
+        return gemini.with_fallbacks(fallback_chain)
+
+    return primary_ollama.with_fallbacks([safety_net])
 
 
 def configure_logging() -> None:

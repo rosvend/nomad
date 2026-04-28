@@ -25,6 +25,11 @@ def to_markdown(plan: TravelPlan) -> str:
     lines.append(f"_Travelers: {plan.travelers}  ·  Budget: {plan.budget_tier or 'n/a'}_")
     lines.append("")
 
+    if plan.summary:
+        lines.append("## Summary")
+        lines.append(plan.summary)
+        lines.append("")
+
     lines.append("## Flights")
     lines.append(_flights_section(plan.flights))
     lines.append("")
@@ -38,7 +43,7 @@ def to_markdown(plan: TravelPlan) -> str:
     lines.append("")
 
     lines.append("## Itinerary")
-    lines.append(_section(plan.itinerary, "No itinerary stops yet."))
+    lines.append(_itinerary_section(plan.itinerary))
     lines.append("")
 
     lines.append("## Logistics")
@@ -154,6 +159,39 @@ def _hotels_section(hotels: list) -> str:
             lines.append(f"> {h.notes}")
         lines.append("")
     return "\n".join(lines)
+
+
+def _itinerary_section(stops: list) -> str:
+    """Day-by-day rendering of `ItineraryStop` entries."""
+    if not stops:
+        return "_No itinerary stops yet._"
+
+    # Group by day, preserving stop order within each day.
+    by_day: dict[int, list] = {}
+    for s in stops:
+        by_day.setdefault(s.day, []).append(s)
+
+    lines: list[str] = []
+    for day in sorted(by_day):
+        items = by_day[day]
+        # Pull the date from the first item with a start_time, if any.
+        date_str = ""
+        for it in items:
+            if it.start_time is not None:
+                date_str = f" — {_fmt_dt(it.start_time).split(' ')[0]}"
+                break
+        lines.append(f"### Day {day}{date_str}")
+        for it in items:
+            time_str = _fmt_dt(it.start_time).split(" ", 1)[1] if it.start_time else "—"
+            duration = _fmt_minutes(it.duration_minutes) if it.duration_minutes else ""
+            tag = f"  ·  {duration}" if duration else ""
+            lines.append(f"- **{time_str}**  {it.name}{tag}")
+            if it.address:
+                lines.append(f"  📍 {it.address}")
+            if it.notes:
+                lines.append(f"  > {it.notes}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 def _logistics_section(legs: list) -> str:
