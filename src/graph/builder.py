@@ -1,15 +1,19 @@
 """Assemble the LangGraph StateGraph that orchestrates every agent.
 
-Topology:
+Topology::
 
-    START → router → (Send) → {flights, hotel, food, logistics}
-                                         ↓ (join)
-                                    synthesizer → END
+    START → router → (Send) → {flights, hotel, food}
+                               flights ─────────────────→ synthesizer
+                               hotel  ──┐
+                                        ├── logistics ──→ synthesizer
+                               food   ──┘
+                                              synthesizer → END
 
-The four specialists are dispatched in parallel via `Send()` from a
-conditional edge after the router. Each specialist edges directly into
-the synthesizer; LangGraph waits until all incoming edges have produced
-state before running the synthesizer node.
+The Router fans out three specialists in parallel via `Send()`. Logistics
+has explicit incoming edges from `hotel` and `food`; LangGraph joins on
+incoming edges, so Logistics runs once after both have written their
+state. The Synthesizer joins on `flights` + `logistics` (which itself
+already encodes the hotel + food join), then renders the final plan.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from src.agents.hotel_agent import hotel_agent
 from src.agents.logistics_agent import logistics_agent
 from src.agents.router import router_agent
 from src.agents.synthesizer import synthesizer_agent
-from src.graph.edges import SPECIALIST_NODES, fan_out_to_specialists
+from src.graph.edges import INITIAL_SPECIALISTS, fan_out_to_specialists
 from src.state.trip_state import TripState
 
 
@@ -41,10 +45,17 @@ def build_graph():
     graph.add_conditional_edges(
         "router",
         fan_out_to_specialists,
-        list(SPECIALIST_NODES),
+        list(INITIAL_SPECIALISTS),
     )
-    for node in SPECIALIST_NODES:
-        graph.add_edge(node, "synthesizer")
+
+    # Logistics joins on hotel + food (LangGraph waits for both).
+    graph.add_edge("hotel", "logistics")
+    graph.add_edge("food", "logistics")
+
+    # Synthesizer joins on flights + logistics.
+    graph.add_edge("flights", "synthesizer")
+    graph.add_edge("logistics", "synthesizer")
+
     graph.add_edge("synthesizer", END)
 
     return graph.compile()

@@ -92,10 +92,19 @@ class LogisticsLeg(BaseModel):
 
     from_stop: str
     to_stop: str
-    mode: Literal["walk", "transit", "drive", "bike", "taxi"]
-    duration_minutes: int
+    mode: Literal["walk", "transit", "drive", "bike", "taxi"] = "walk"
+    duration_minutes: float | None = None  # OSRM returns float; widened from int
     distance_km: float | None = None
     instructions_url: str | None = None
+    # Pair coordinates so a future map renderer doesn't need to re-geocode.
+    from_lat: float | None = None
+    from_lon: float | None = None
+    to_lat: float | None = None
+    to_lon: float | None = None
+    # Coarse bucketing — e.g. "hotel→restaurant", "hotel→attraction" — lets
+    # the formatter group legs by purpose.
+    category: str | None = None
+    notes: str | None = None
 
 
 class TravelPlan(BaseModel):

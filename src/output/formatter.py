@@ -42,7 +42,7 @@ def to_markdown(plan: TravelPlan) -> str:
     lines.append("")
 
     lines.append("## Logistics")
-    lines.append(_section(plan.logistics, "No logistics computed yet."))
+    lines.append(_logistics_section(plan.logistics))
     lines.append("")
 
     if plan.errors:
@@ -154,6 +154,37 @@ def _hotels_section(hotels: list) -> str:
             lines.append(f"> {h.notes}")
         lines.append("")
     return "\n".join(lines)
+
+
+def _logistics_section(legs: list) -> str:
+    """Walking-leg listing grouped by category (hotel→restaurant, etc.)."""
+    if not legs:
+        return "_No logistics computed yet._"
+
+    # Group preserving order of first appearance.
+    grouped: dict[str, list] = {}
+    for leg in legs:
+        cat = leg.category or "other"
+        grouped.setdefault(cat, []).append(leg)
+
+    lines: list[str] = []
+    for cat, group in grouped.items():
+        # Pretty label: "hotel→restaurant" → "Hotel → Restaurant"
+        label = " → ".join(p.replace("_", " ").title() for p in cat.split("→"))
+        lines.append(f"_{label}_")
+        for leg in group:
+            duration = _fmt_minutes(leg.duration_minutes) if leg.duration_minutes else "—"
+            distance = f"{leg.distance_km:.1f} km" if leg.distance_km is not None else "—"
+            lines.append(
+                f"- **{leg.from_stop}** → **{leg.to_stop}**  ·  "
+                f"{leg.mode}  ·  {duration}  ·  {distance}"
+            )
+            if leg.instructions_url:
+                lines.append(f"  🗺 {leg.instructions_url}")
+            if leg.notes:
+                lines.append(f"  > {leg.notes}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 def _restaurants_section(restaurants: list) -> str:
