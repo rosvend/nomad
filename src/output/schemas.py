@@ -114,6 +114,7 @@ class TravelPlan(BaseModel):
     dates: dict[str, str] | None = None
     travelers: int = 1
     budget_tier: str | None = None
+    user_lodging: str | None = None  # Set when the user told us where they're staying
 
     flights: list[Flight] = Field(default_factory=list)
     hotels: list[Hotel] = Field(default_factory=list)

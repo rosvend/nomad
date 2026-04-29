@@ -53,10 +53,31 @@ async def _resolve_starting_point(state: TripState) -> dict[str, Any] | None:
     """Pick the lat/lon to route every leg from.
 
     Order of preference:
-      1. The top-ranked hotel that has coordinates (typically state["hotels"][0]).
-      2. Geocoded destination centroid.
-      3. None — the agent will surface a helpful error.
+      1. User-provided lodging (geocoded). Anchored to the destination so
+         partial addresses like "cra 66 #48-106" resolve in the right city.
+      2. The top-ranked hotel that has coordinates (typically state["hotels"][0]).
+      3. Geocoded destination centroid.
+      4. None — the agent will surface a helpful error.
     """
+    user_lodging = state.get("user_lodging")
+    destination = state.get("destination")
+    if user_lodging:
+        # Anchor the geocode query to the destination so partial addresses
+        # ("cra 66 #48-106") don't match a same-named street in another city.
+        query = ", ".join(p for p in (user_lodging, destination) if p)
+        geo = await geocode.ainvoke({"query": query})
+        if geo["ok"]:
+            return {
+                "name": user_lodging,
+                "lat": geo["data"]["lat"],
+                "lon": geo["data"]["lon"],
+                "kind": "user_lodging",
+            }
+        log.warning(
+            "logistics: could not geocode user_lodging %r — falling back to hotel/destination",
+            user_lodging,
+        )
+
     for h in state.get("hotels") or []:
         if _has_coords(h):
             return {
@@ -66,7 +87,6 @@ async def _resolve_starting_point(state: TripState) -> dict[str, Any] | None:
                 "kind": "hotel",
             }
 
-    destination = state.get("destination")
     if destination:
         geo = await geocode.ainvoke({"query": destination})
         if geo["ok"]:

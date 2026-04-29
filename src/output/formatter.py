@@ -7,6 +7,7 @@ emoji bullets, tables of flights, etc.) lands once specialists return data.
 from __future__ import annotations
 
 import json
+from urllib.parse import quote
 
 from src.output.schemas import TravelPlan
 
@@ -31,12 +32,21 @@ def to_markdown(plan: TravelPlan) -> str:
         lines.append("")
 
     lines.append("## Flights")
+    deeplink = _flights_search_url(plan)
+    if deeplink:
+        lines.append(f"_Verify on Google Flights: {deeplink}_")
+        lines.append("")
     lines.append(_flights_section(plan.flights))
     lines.append("")
 
-    lines.append("## Hotels")
-    lines.append(_hotels_section(plan.hotels))
-    lines.append("")
+    if plan.user_lodging:
+        lines.append("## Lodging")
+        lines.append(f"_Provided by user: {plan.user_lodging}_")
+        lines.append("")
+    else:
+        lines.append("## Hotels")
+        lines.append(_hotels_section(plan.hotels))
+        lines.append("")
 
     lines.append("## Restaurants")
     lines.append(_restaurants_section(plan.restaurants))
@@ -78,6 +88,28 @@ def _fmt_dt(dt) -> str:
     s = str(dt)
     # Python datetime → "2026-05-01T00:05:00" or "2026-05-01 00:05:00"
     return s.replace("T", " ").rsplit(":", 1)[0]
+
+
+def _flights_search_url(plan: TravelPlan) -> str | None:
+    """Build a Google Flights deeplink users can click to sanity-check results.
+
+    Origin comes from the first flight's IATA (correct for direct + multi-leg).
+    Destination comes from `plan.destination` (the user's requested city)
+    rather than the first flight's `destination` field, because for multi-stop
+    routes `fli`'s normalizer can surface the layover airport — leading to a
+    misleading deeplink like "MDE → GYE" when the user asked for Santa Marta.
+    """
+    if not plan.flights or not plan.destination:
+        return None
+    origin = plan.flights[0].origin
+    if not origin:
+        return None
+    parts = [f"Flights from {origin} to {plan.destination}"]
+    if plan.dates and plan.dates.get("start"):
+        parts.append(f"on {plan.dates['start']}")
+    if plan.dates and plan.dates.get("end"):
+        parts.append(f"through {plan.dates['end']}")
+    return f"https://www.google.com/travel/flights?q={quote(' '.join(parts))}"
 
 
 def _flights_section(flights: list) -> str:

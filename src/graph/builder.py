@@ -12,8 +12,10 @@ Topology::
 The Router fans out three specialists in parallel via `Send()`. Logistics
 has explicit incoming edges from `hotel` and `food`; LangGraph joins on
 incoming edges, so Logistics runs once after both have written their
-state. The Synthesizer joins on `flights` + `logistics` (which itself
-already encodes the hotel + food join), then renders the final plan.
+state. The Synthesizer is registered with `defer=True` so it runs exactly
+once after every other node has settled, regardless of which superstep
+each upstream finishes in. Without `defer`, a fast-failing `flights` path
+fires the synthesizer before `logistics` completes, producing two passes.
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ def build_graph():
     graph.add_node("hotel", hotel_agent)
     graph.add_node("food", food_agent)
     graph.add_node("logistics", logistics_agent)
-    graph.add_node("synthesizer", synthesizer_agent)
+    graph.add_node("synthesizer", synthesizer_agent, defer=True)
 
     graph.add_edge(START, "router")
     graph.add_conditional_edges(
@@ -52,7 +54,9 @@ def build_graph():
     graph.add_edge("hotel", "logistics")
     graph.add_edge("food", "logistics")
 
-    # Synthesizer joins on flights + logistics.
+    # Synthesizer joins on flights + logistics. defer=True on the node
+    # ensures it runs exactly once at the end, even when upstream nodes
+    # complete in different supersteps.
     graph.add_edge("flights", "synthesizer")
     graph.add_edge("logistics", "synthesizer")
 

@@ -25,6 +25,9 @@ class TripState(TypedDict, total=False):
     travelers: int | None
     budget_tier: str | None  # "budget" | "mid" | "luxury"
     preferences: list[str]  # ["vegetarian", "museums", "no-redeye", ...]
+    user_lodging: str | None  # Router writes when user said "I'm staying at <X>";
+                              # Hotel agent skips search and Logistics uses it as
+                              # the routing origin.
 
     # --- specialist outputs (each specialist writes its own field) ---
     flights: Annotated[list[dict[str, Any]], operator.add]  # Flight Agent

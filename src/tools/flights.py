@@ -70,7 +70,13 @@ async def _search_flights_fli(
     adults: int,
     seat: SeatClass,
 ) -> ToolResult:
-    """Primary path — Fli wrapped in a thread."""
+    """Primary path — Fli wrapped in a thread.
+
+    Two-stage call: try `MaxStops.NON_STOP` first; if no nonstops exist
+    on this date, fall back to `MaxStops.ANY`. This avoids the failure
+    mode where fli returned a 5h MDE→GYE→SMR layover at COP 1,405,980
+    while $295 1h20 nonstops were available on Google Flights.
+    """
     from fli.models import (
         FlightSearchFilters,
         FlightSegment,
@@ -106,26 +112,61 @@ async def _search_flights_fli(
         )
         trip = TripType.ROUND_TRIP
 
-    filters = FlightSearchFilters(
-        trip_type=trip,
-        passenger_info=PassengerInfo(adults=adults),
-        flight_segments=segments,
-        stops=MaxStops.ANY,
-        seat_type=seat_type,
-        sort_by=SortBy.CHEAPEST,
-    )
+    def _build_filters(stops: Any) -> Any:
+        return FlightSearchFilters(
+            trip_type=trip,
+            passenger_info=PassengerInfo(adults=adults),
+            flight_segments=segments,
+            stops=stops,
+            seat_type=seat_type,
+            sort_by=SortBy.CHEAPEST,
+        )
 
-    def _sync_call() -> Any:
+    def _run(filters: Any) -> Any:
         return SearchFlights().search(filters)
 
-    async def _call() -> ToolResult:
-        results = await asyncio.to_thread(_sync_call)
-        if not results:
-            return error_result("fli", "no_results", "No flights returned")
-        flights = [_normalize_fli_flight(r) for r in results]
-        return ok_result("fli", flights)
+    async def _try(stops: Any) -> ToolResult:
+        async def _call() -> ToolResult:
+            results = await asyncio.to_thread(_run, _build_filters(stops))
+            if not results:
+                return error_result("fli", "no_results", "No flights returned")
+            flights = [
+                _normalize_fli_flight(r, requested_destination=destination)
+                for r in results
+            ]
+            # Drop flights whose actual outbound destination differs from the
+            # requested IATA. fli sometimes returns flights to entirely
+            # different cities for poorly-indexed routes (e.g. MDE→SMR
+            # surfaced flights to GYE/Guayaquil). Better to fall through to
+            # SerpApi than mislead the user.
+            requested = destination.upper()
+            relevant = [
+                f for f in flights
+                if (f.get("destination") or "").upper() == requested
+            ]
+            dropped = len(flights) - len(relevant)
+            if dropped:
+                log.info(
+                    "fli: dropped %d/%d results whose destination wasn't %s",
+                    dropped, len(flights), requested,
+                )
+            if not relevant:
+                return error_result(
+                    "fli",
+                    "no_results",
+                    f"No flights to {requested} (fli returned only off-route results)",
+                )
+            return ok_result("fli", relevant)
+        return await safe_call("fli", _call)
 
-    return await safe_call("fli", _call)
+    nonstop = await _try(MaxStops.NON_STOP)
+    if nonstop["ok"]:
+        return nonstop
+    if nonstop.get("error_type") != "no_results":
+        return nonstop  # network/auth/etc — bubble up immediately
+    log.info("fli: no nonstops for %s->%s on %s — retrying stops=ANY",
+             origin, destination, depart_date)
+    return await _try(MaxStops.ANY)
 
 
 def _ap_code(ap: Any) -> str | None:
@@ -163,7 +204,15 @@ def _leg_dict(leg: Any, leg_type: str | None = None) -> dict[str, Any]:
     return d
 
 
-def _normalize_one_way(r: Any) -> dict[str, Any]:
+def _normalize_one_way(r: Any, requested_destination: str | None = None) -> dict[str, Any]:  # noqa: ARG001
+    """Normalize a one-way FlightResult.
+
+    `requested_destination` is accepted for signature parity with the
+    round-trip path and to support future filtering, but we no longer
+    override `destination` from it: the upstream filter in
+    `_search_flights_fli` drops flights whose actual final stop doesn't
+    match the request, which is the truthful behaviour.
+    """
     legs = list(r.legs or [])
     first = legs[0] if legs else None
     last = legs[-1] if legs else None
@@ -191,7 +240,9 @@ def _normalize_one_way(r: Any) -> dict[str, Any]:
     }
 
 
-def _normalize_round_trip(outbound: Any, ret: Any) -> dict[str, Any]:
+def _normalize_round_trip(
+    outbound: Any, ret: Any, requested_destination: str | None = None  # noqa: ARG001
+) -> dict[str, Any]:
     """Combine an (outbound, return) FlightResult pair into one Flight dict.
 
     Fli returns round-trip results as `list[tuple[FlightResult, FlightResult]]`
@@ -236,7 +287,9 @@ def _normalize_round_trip(outbound: Any, ret: Any) -> dict[str, Any]:
     }
 
 
-def _normalize_fli_flight(r: Any) -> dict[str, Any]:
+def _normalize_fli_flight(
+    r: Any, requested_destination: str | None = None
+) -> dict[str, Any]:
     """Normalize one Fli result row.
 
     Fli returns:
@@ -246,8 +299,8 @@ def _normalize_fli_flight(r: Any) -> dict[str, Any]:
       dict so downstream agents reason about complete trip options.
     """
     if isinstance(r, tuple) and len(r) == 2:
-        return _normalize_round_trip(r[0], r[1])
-    return _normalize_one_way(r)
+        return _normalize_round_trip(r[0], r[1], requested_destination)
+    return _normalize_one_way(r, requested_destination)
 
 
 async def _search_flights_serpapi(

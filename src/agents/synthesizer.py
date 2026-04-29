@@ -121,7 +121,12 @@ async def _generate_summary(
         return None
 
     days = {stop["day"] for stop in itinerary}
-    top_hotel = plan.hotels[0].name if plan.hotels else "(none chosen)"
+    if plan.user_lodging:
+        top_hotel = f"user-provided lodging at {plan.user_lodging}"
+    elif plan.hotels:
+        top_hotel = plan.hotels[0].name
+    else:
+        top_hotel = "(none chosen)"
     top_restaurant = plan.restaurants[0].name if plan.restaurants else "—"
     attractions = _attractions_from_logistics(state.get("logistics"))
     top_attraction = attractions[0]["name"] if attractions else "—"
@@ -160,6 +165,17 @@ async def synthesizer_agent(state: TripState) -> dict:
     restaurants, e3 = _validate_list(state.get("restaurants"), Restaurant, "restaurants")
     logistics, e5 = _validate_list(state.get("logistics"), LogisticsLeg, "logistics")
 
+    # If the router couldn't extract dates, the itinerary builder silently
+    # falls back to date.today(). Surface that so the rendered output
+    # makes the fallback visible instead of misleading the user.
+    e_dates: list[dict[str, Any]] = []
+    if not state.get("dates"):
+        e_dates.append({
+            "agent": "synthesizer",
+            "stage": "dates",
+            "message": "no dates resolved from query — itinerary defaulted to today + 3 days",
+        })
+
     # Itinerary skeleton — algorithmic distribution, no LLM.
     attractions = _attractions_from_logistics(state.get("logistics"))
     itinerary_dicts = build_itinerary(
@@ -178,12 +194,13 @@ async def synthesizer_agent(state: TripState) -> dict:
         dates=state.get("dates"),
         travelers=state.get("travelers") or 1,
         budget_tier=state.get("budget_tier"),
+        user_lodging=state.get("user_lodging"),
         flights=flights,
         hotels=hotels,
         restaurants=restaurants,
         itinerary=itinerary,
         logistics=logistics,
-        errors=[*state.get("errors", []), *e1, *e2, *e3, *e4, *e5],
+        errors=[*state.get("errors", []), *e1, *e2, *e3, *e4, *e5, *e_dates],
     )
 
     # Optional narrative summary on top.

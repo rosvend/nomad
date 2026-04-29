@@ -143,7 +143,15 @@ async def _enrich_with_places(candidate: dict[str, Any], destination: str) -> di
     city_hint = candidate.get("tags", {}).get("addr:city") or destination
     query = f"{name} restaurant {city_hint}".strip()
 
-    res = await get_reviews.ainvoke({"query": query, "max_reviews": 1})
+    # See hotel_agent._enrich_with_places for why coords matter here:
+    # without locationbias, "Frutoss Restaurante Vegetariano" matches a
+    # popular Cali restaurant when the user is planning Santa Marta.
+    res = await get_reviews.ainvoke({
+        "query": query,
+        "max_reviews": 1,
+        "lat": candidate.get("lat"),
+        "lon": candidate.get("lon"),
+    })
     if not res["ok"]:
         candidate["enrichment_error"] = res.get("error_type")
         return candidate
@@ -152,8 +160,13 @@ async def _enrich_with_places(candidate: dict[str, Any], destination: str) -> di
     candidate["rating"] = d.get("rating")
     candidate["review_count"] = d.get("review_count")
     candidate["price_level"] = d.get("price_level")
-    if d.get("address"):
-        candidate["address"] = d["address"]
+    google_addr = d.get("address")
+    if google_addr and destination.lower() in google_addr.lower():
+        candidate["address"] = google_addr
+    elif google_addr:
+        # Google's address points at a different city — keep OSM's. The
+        # mismatch is signal enough to warn downstream consumers.
+        candidate["enrichment_error"] = "address_other_city"
     candidate["website"] = d.get("website")
     candidate["google_url"] = d.get("google_url")
     return candidate

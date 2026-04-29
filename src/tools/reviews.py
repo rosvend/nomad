@@ -95,24 +95,44 @@ DETAILS_FIELDS = (
 )
 
 
-async def _find_place(query: str, key: str) -> ToolResult:
-    """Resolve a free-form query to a `place_id`. Quota: 1 google_places call."""
-    cache_key = _norm_key(query)
+async def _find_place(
+    query: str,
+    key: str,
+    lat: float | None = None,
+    lon: float | None = None,
+    bias_radius_m: int = 5000,
+) -> ToolResult:
+    """Resolve a free-form query to a `place_id`. Quota: 1 google_places call.
+
+    When `lat`/`lon` are provided, the request includes `locationbias` so
+    Google's matcher prefers nearby candidates. Without it, common names
+    ("Frutoss Restaurante Vegetariano") match the most popular global
+    instance and pollute results with places from other cities.
+    """
+    bias_suffix = (
+        f"@{round(lat, 3)},{round(lon, 3)}r{bias_radius_m}"
+        if lat is not None and lon is not None
+        else ""
+    )
+    cache_key = _norm_key(query) + bias_suffix
     cached = _cache_get(_find_cache, cache_key)
     if cached is not None:
         log.info("places find_place cache HIT for %r", query)
         return ok_result("google_places", {"place_id": cached, "cached": True})
 
     async def _call() -> ToolResult:
+        params: dict[str, Any] = {
+            "input": query,
+            "inputtype": "textquery",
+            "fields": "place_id,name",
+            "key": key,
+        }
+        if lat is not None and lon is not None:
+            params["locationbias"] = f"circle:{bias_radius_m}@{lat},{lon}"
         async with http_client() as client:
             resp = await client.get(
                 f"{PLACES_BASE}/findplacefromtext/json",
-                params={
-                    "input": query,
-                    "inputtype": "textquery",
-                    "fields": "place_id,name",
-                    "key": key,
-                },
+                params=params,
             )
             resp.raise_for_status()
             payload = resp.json()
@@ -260,13 +280,24 @@ async def _maps_grounding(prompt: str, key: str) -> ToolResult:
 # ── Public @tool surface ─────────────────────────────────────────────
 
 @tool
-async def get_reviews(query: str, max_reviews: int = 5) -> ToolResult:
+async def get_reviews(
+    query: str,
+    max_reviews: int = 5,
+    lat: float | None = None,
+    lon: float | None = None,
+) -> ToolResult:
     """Fetch user reviews + metadata for a place.
 
     Args:
         query: free-form name, e.g. "Ichiran Shibuya".
         max_reviews: cap on returned review snippets (1-5 — Google
             returns at most 5 per place).
+        lat, lon: optional caller-supplied coordinates for location bias.
+            When set, Google's matcher prefers nearby candidates within
+            ~5km. Strongly recommended when enriching OSM POIs since
+            common names match the most popular global instance otherwise
+            (e.g. "Frutoss Restaurante Vegetariano" → Cali instead of
+            Santa Marta).
 
     Returns structured data: rating, review_count, top reviews with
     author/rating/time/text, address, hours, price_level, website,
@@ -286,7 +317,9 @@ async def get_reviews(query: str, max_reviews: int = 5) -> ToolResult:
 
     log.info("get_reviews %r (max=%d)", query, max_reviews)
 
-    found = await _find_place(query, settings.google_maps_api_key)
+    found = await _find_place(
+        query, settings.google_maps_api_key, lat=lat, lon=lon
+    )
     if not found["ok"]:
         return found
 

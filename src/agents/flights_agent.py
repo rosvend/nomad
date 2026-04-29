@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from src.config import get_settings
+from src.config import get_llm, get_settings
 from src.state.trip_state import TripState
 from src.tools import search_flights
 
@@ -75,6 +75,18 @@ _CITY_TO_IATA: dict[str, str] = {
     "sao paulo": "GRU", "rio de janeiro": "GIG",
     "buenos aires": "EZE", "lima": "LIM",
     "bogota": "BOG", "santiago": "SCL", "medellin": "MDE",
+    # Colombia (project hometown — keep this thorough)
+    "cartagena": "CTG", "cali": "CLO", "barranquilla": "BAQ",
+    "santa marta": "SMR", "pereira": "PEI", "bucaramanga": "BGA",
+    "san andres": "ADZ", "san andrés": "ADZ", "armenia": "AXM",
+    "monteria": "MTR", "montería": "MTR", "valledupar": "VUP",
+    "riohacha": "RCH", "cucuta": "CUC", "cúcuta": "CUC",
+    "pasto": "PSO", "ibague": "IBE", "ibagué": "IBE",
+    "leticia": "LET", "manizales": "MZL", "neiva": "NVA",
+    # Central America & nearby gaps
+    "quito": "UIO", "guayaquil": "GYE", "panama city": "PTY",
+    "san jose": "SJO", "tegucigalpa": "TGU", "guatemala city": "GUA",
+    "san salvador": "SAL", "managua": "MGA", "havana": "HAV",
     # Oceania
     "sydney": "SYD", "melbourne": "MEL", "auckland": "AKL",
     # Africa & Middle East
@@ -85,7 +97,7 @@ _CITY_TO_IATA: dict[str, str] = {
 
 # ── IATA resolution ──────────────────────────────────────────────────
 
-def _resolve_iata(value: str | None) -> str | None:
+async def _resolve_iata(value: str | None) -> str | None:
     """Normalise a free-form input to a 3-letter IATA code.
 
     - Already an IATA code (3 alphabetic chars): uppercase and return it
@@ -93,14 +105,51 @@ def _resolve_iata(value: str | None) -> str | None:
       the search_flights tool catches unknown codes and returns
       `missing_config` cleanly.
     - Known city in `_CITY_TO_IATA`: return its primary airport.
-    - Otherwise: None — caller surfaces a helpful error.
+    - Otherwise: ask the LLM for a best guess. Returns None if the LLM
+      can't help (offline, schema-violating reply, etc.).
     """
     if not value:
         return None
     v = value.strip()
     if len(v) == 3 and v.isalpha():
         return v.upper()
-    return _CITY_TO_IATA.get(v.lower())
+    hit = _CITY_TO_IATA.get(v.lower())
+    if hit:
+        return hit
+    return await _llm_iata_fallback(v)
+
+
+async def _llm_iata_fallback(city: str) -> str | None:
+    """Last-resort: ask the LLM for the primary IATA. None on any failure.
+
+    Cheap to add — one extra LLM call per query, only triggered when the
+    dict misses. If the LLM hallucinates an unknown code, the downstream
+    `_resolve_airport` in `tools/flights.py` returns `missing_config`
+    cleanly, so a bad guess degrades to the same error path as before.
+    """
+    try:
+        llm = get_llm()
+    except Exception as e:  # noqa: BLE001
+        log.info("flights: LLM unavailable for IATA fallback (%s)", e)
+        return None
+    prompt = (
+        f"Return ONLY the 3-letter IATA airport code for the primary "
+        f"international airport serving '{city}'. Reply with exactly 3 "
+        f"uppercase letters and nothing else. If no major airport exists "
+        f"or you don't know, reply NONE."
+    )
+    try:
+        resp = await llm.ainvoke(prompt)
+    except Exception as e:  # noqa: BLE001
+        log.info("flights: IATA fallback call failed (%s: %s)", type(e).__name__, e)
+        return None
+    text = resp.content if hasattr(resp, "content") else str(resp)
+    text = text.strip().upper() if isinstance(text, str) else ""
+    text = text.split()[0] if text else ""  # trim accidental prose
+    if len(text) == 3 and text.isalpha() and text != "NON":
+        log.info("flights: IATA fallback resolved %r -> %s", city, text)
+        return text
+    return None
 
 
 # ── Scoring helpers (in-batch normalization) ─────────────────────────
@@ -202,8 +251,8 @@ async def flights_agent(state: TripState) -> dict:
             "flights": [],
         }
 
-    origin_iata = _resolve_iata(origin_raw)
-    dest_iata = _resolve_iata(destination)
+    origin_iata = await _resolve_iata(origin_raw)
+    dest_iata = await _resolve_iata(destination)
     if not origin_iata:
         return {
             "errors": [{

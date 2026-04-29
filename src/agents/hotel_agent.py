@@ -80,7 +80,16 @@ async def _enrich_with_places(candidate: dict[str, Any], destination: str) -> di
     city_hint = candidate.get("tags", {}).get("addr:city") or destination
     query = f"{name} hotel {city_hint}".strip()
 
-    res = await get_reviews.ainvoke({"query": query, "max_reviews": 1})
+    # Pass the OSM candidate's coords through so Google constrains its
+    # match to the same neighborhood — otherwise common names match the
+    # most popular global instance (e.g. a Pereira hotel matched into
+    # a Santa Marta plan).
+    res = await get_reviews.ainvoke({
+        "query": query,
+        "max_reviews": 1,
+        "lat": candidate.get("lat"),
+        "lon": candidate.get("lon"),
+    })
     if not res["ok"]:
         candidate["enrichment_error"] = res.get("error_type")
         return candidate
@@ -89,10 +98,16 @@ async def _enrich_with_places(candidate: dict[str, Any], destination: str) -> di
     candidate["rating"] = d.get("rating")
     candidate["review_count"] = d.get("review_count")
     candidate["price_level"] = d.get("price_level")
-    # Prefer Google's clean address/name over OSM's local-language version
-    # only when Google actually returned them.
-    if d.get("address"):
-        candidate["address"] = d["address"]
+    # Prefer Google's clean address only if it actually mentions the
+    # destination — guard against the rare case where locationbias still
+    # returns a wrong-city match (e.g. tiny radius miss). Fallback keeps
+    # OSM's address, which we know is correct because OSM is what we
+    # geocoded against in the first place.
+    google_addr = d.get("address")
+    if google_addr and destination.lower() in google_addr.lower():
+        candidate["address"] = google_addr
+    elif google_addr:
+        candidate["enrichment_error"] = "address_other_city"
     candidate["website"] = d.get("website")
     candidate["google_url"] = d.get("google_url")
     return candidate
@@ -147,6 +162,13 @@ async def hotel_agent(state: TripState) -> dict:
             "errors": [{"agent": "hotel", "stage": "input", "message": "no destination"}],
             "hotels": [],
         }
+
+    # User told us where they're staying — don't compete with their choice.
+    # Logistics will geocode the address and use it as its routing origin.
+    user_lodging = state.get("user_lodging")
+    if user_lodging:
+        log.info("hotel: user_lodging set (%r) — skipping hotel search", user_lodging)
+        return {"hotels": []}
 
     budget_tier = state.get("budget_tier") or "mid"
     log.info("hotel: searching destination=%r tier=%r", destination, budget_tier)

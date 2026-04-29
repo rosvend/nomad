@@ -27,18 +27,21 @@ from typing import Any, Literal
 
 from langchain_core.tools import tool
 
+from src.config import get_settings
 from src.tools._common import (
     ToolResult,
     error_result,
     http_client,
     ok_result,
     safe_call,
+    with_quota,
 )
 
 log = logging.getLogger(__name__)
 
 NOMINATIM_BASE = "https://nominatim.openstreetmap.org"
 OVERPASS_BASE = "https://overpass-api.de/api/interpreter"
+GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 
 PoiCategory = Literal["hotel", "restaurant", "cafe", "attraction", "any"]
 
@@ -90,25 +93,93 @@ async def _nominatim_search(query: str, limit: int) -> list[dict[str, Any]]:
         return resp.json()
 
 
-async def _geocode_impl(query: str) -> ToolResult:
-    """Geocode `query` using Nominatim. Internal — share with wrappers."""
+async def _google_geocode(query: str, key: str) -> ToolResult:
+    """Geocode via Google's Geocoding API. Quota: 1 google_places call.
+
+    Reaches places Nominatim doesn't index — particularly Latin American
+    `carrera #X-Y` notation, conjuntos, and other building-level
+    addresses. Counts against `google_places` since it's the same
+    monthly Maps Platform credit as findplace/details lookups.
+    """
     async def _call() -> ToolResult:
-        items = await _nominatim_search(query, limit=1)
-        if not items:
-            return error_result(
-                "nominatim", "no_results", f"Could not geocode {query!r}"
+        async with http_client() as client:
+            resp = await client.get(
+                GOOGLE_GEOCODE_URL,
+                params={"address": query, "key": key},
             )
-        item = items[0]
+            resp.raise_for_status()
+            payload = resp.json()
+        status = payload.get("status")
+        if status == "ZERO_RESULTS":
+            return error_result(
+                "google_geocode", "no_results", f"Could not geocode {query!r}"
+            )
+        if status != "OK":
+            return error_result(
+                "google_geocode",
+                "provider_error",
+                f"geocode returned {status}: {payload.get('error_message', '')}",
+            )
+        results = payload.get("results") or []
+        if not results:
+            return error_result(
+                "google_geocode", "no_results", f"Could not geocode {query!r}"
+            )
+        top = results[0]
+        loc = (top.get("geometry") or {}).get("location") or {}
         return ok_result(
-            "nominatim",
+            "google_geocode",
             {
-                "lat": float(item["lat"]),
-                "lon": float(item["lon"]),
-                "display_name": item.get("display_name"),
+                "lat": float(loc["lat"]),
+                "lon": float(loc["lng"]),
+                "display_name": top.get("formatted_address"),
             },
         )
 
-    return await safe_call("nominatim", _call)
+    return await with_quota("google_places", _call)
+
+
+async def _geocode_impl(query: str) -> ToolResult:
+    """Geocode `query`. Nominatim primary; Google Geocoding API fallback.
+
+    Why two providers: Nominatim's address index is great for cities and
+    landmarks but thin on Latin American building-level addresses
+    ("cra 66 #48-106"). Google's Geocoding API handles those cleanly.
+    The fallback only fires when Nominatim returns no results AND the
+    user has set `GOOGLE_MAPS_API_KEY`; otherwise we surface the original
+    Nominatim miss.
+    """
+    async def _call() -> ToolResult:
+        items = await _nominatim_search(query, limit=1)
+        if items:
+            item = items[0]
+            return ok_result(
+                "nominatim",
+                {
+                    "lat": float(item["lat"]),
+                    "lon": float(item["lon"]),
+                    "display_name": item.get("display_name"),
+                },
+            )
+        return error_result(
+            "nominatim", "no_results", f"Could not geocode {query!r}"
+        )
+
+    primary = await safe_call("nominatim", _call)
+    if primary["ok"]:
+        return primary
+
+    settings = get_settings()
+    if primary.get("error_type") == "no_results" and settings.google_maps_api_key:
+        log.info("geocode: nominatim missed %r — trying Google Geocoding", query)
+        google = await _google_geocode(query, settings.google_maps_api_key)
+        if google["ok"]:
+            return google
+        log.info(
+            "geocode: Google fallback also failed (%s)",
+            google.get("error_type"),
+        )
+    return primary
 
 
 # ── Overpass plumbing ─────────────────────────────────────────────────

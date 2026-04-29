@@ -60,3 +60,15 @@ class RouterOutput(BaseModel):
             "Empty list if no preferences expressed."
         ),
     )
+    user_lodging: str | None = Field(
+        default=None,
+        description=(
+            "If the user mentioned where they'll be staying (a friend's or "
+            "family member's address, an Airbnb, a specific hotel name they "
+            "have already booked, etc.), extract the address or place name. "
+            "Examples: 'staying at my grandmas: cra 66 #48-106' → "
+            "'cra 66 #48-106'. 'I booked the Park Hyatt' → 'Park Hyatt'. "
+            "'my Airbnb is on Calle 53' → 'Calle 53'. "
+            "Null if the user did not mention a specific lodging."
+        ),
+    )
