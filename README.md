@@ -44,6 +44,7 @@ nomad/
 
 * Python +3.11 
 * uv (package manager)
+* Ollama
 
 ### Quick start
 
@@ -58,32 +59,18 @@ cp .env.example .env
 ollama pull llama3.1:8b      # safety-net fallback — required
 ollama pull gemma3:12b       # configured default — optional, skip if disk-constrained
 
-# 4. (optional, for web search) start a local SearXNG
+# 4. Run the SearXNG container
 docker compose up -d searxng
 
-# 5. (optional, for JS-rendered page fetching) install Playwright's Chromium
+# 5. Install Playwright's Chromium
 uv run playwright install chromium
 
-# 6. run the planner — try a single-city, then a multi-city, then a vague prompt
-uv run python -m src.main "Plan a 5-day trip to Tokyo from LAX"
+# 6. run the planner
+uv run python -m src.main "Plan a 5-day trip to Santa Marta, Colombia from Medellin"
 uv run python -m src.main "Plan a 1-week trip starting in Medellin. 3 days in Bogota, then 4 days in Cartagena before flying back."
 uv run python -m src.main "Send me somewhere warm with a beach. I have 4 days off next week."
 ```
 
-Steps 4 and 5 are only needed when the agents actually call `web_search`
-or `fetch_page(render=True)`. Skip them for a flights-only / places-only
-run.
-
-### Notes on vague prompts
-
-When the router can't extract a destination (e.g. *"send me somewhere
-warm with a beach"*), the **destination suggester** runs: it asks the
-LLM for 2-3 candidates that fit your origin + preferences + dates,
-prints them, and reads a number from stdin. In a normal terminal the
-session is interactive; in piped / non-tty contexts (CI, scripts) the
-suggester silently picks candidate #1 so headless runs still produce a
-plan. The router's LLM may also infer a destination directly when the
-context is unambiguous, in which case the suggester is skipped.
 
 ### What needs a key?
 
