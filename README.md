@@ -66,8 +66,8 @@ docker compose up -d searxng
 uv run playwright install chromium
 
 # 6. run the planner
-uv run python -m src.main "Plan a 5-day trip to Santa Marta, Colombia from Medellin"
-uv run python -m src.main "Plan a 1-week trip starting in Medellin. 3 days in Bogota, then 4 days in Cartagena before flying back."
+uv run python -m src.main "Plan a 5-day trip to Santa Marta, Colombia from Medellin starting next monday"
+uv run python -m src.main "Plan a 1-week trip starting in Medellin. 3 days in Bogota, then 4 days in Cartagena before flying back. I want to depart may 10th"
 uv run python -m src.main "Send me somewhere warm with a beach. I have 4 days off next week."
 ```
 
