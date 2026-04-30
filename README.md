@@ -80,22 +80,46 @@ unlocks and how the system degrades when it's blank.
 | `.env` field | Unlocks | If blank |
 |---|---|---|
 | `DEFAULT_ORIGIN` | Flight search when the user query has no "from X" | Flight section is empty (not an error) |
-| `GEMINI_API_KEY` | Faster, higher-quality Router & Synthesizer LLM calls | All LLM work goes to local Ollama |
+| `OPENAI_API_KEY` | Fastest LLM path — every router/suggester/synthesizer call goes to OpenAI (default `gpt-4o-mini`; set `OPENAI_MODEL` for `gpt-4o` etc.) | Skipped; chain falls through to Gemini or Ollama |
+| `GEMINI_API_KEY` | Free-tier hosted LLM as a step between OpenAI and local Ollama | Skipped; chain falls through to Ollama |
 | `GOOGLE_MAPS_API_KEY` | Real ratings + review counts in hotel & restaurant ranking | Ranking still works via OSM/Overpass; rating signal absent |
 | `TAVILY_API_KEY` / `SERPAPI_API_KEY` | Hosted web search & flight fallback | Falls back to SearXNG (if up) or returns no results |
 
 The default config talks to a local Ollama (`http://localhost:11434`,
-model `gemma3:12b`, with `llama3.1:8b` as a safety net). Setting
-`GEMINI_API_KEY` flips the LLM chain to Gemini first, with the local
-Ollama models still available as automatic fallbacks on quota / network
-errors.
+model `gemma3:12b`, with `llama3.1:8b` as a safety net). Setting any
+hosted-LLM key flips the chain in priority order **OpenAI → Gemini →
+Ollama-primary → Ollama-safety-net**, and `with_fallbacks` cascades on
+quota / network / schema errors so a flaky upstream doesn't take the
+whole system down. Recommended for tomorrow's class demo: set
+`OPENAI_API_KEY` so a full plan runs in ~30 seconds instead of the 5-10
+minutes Ollama needs.
 
 ### Visualize the graph
 
 ```bash
-uv run langgraph dev
+uv run langgraph dev --no-reload --allow-blocking
 ```
 
 This opens LangGraph Studio against the compiled graph from
 `src/graph/builder.py:build_graph` so you can step through agent
 execution interactively.
+
+A few caveats worth knowing before the demo:
+
+- **`--no-reload` is recommended.** Without it, `watchfiles` treats every
+  `.pyc` rewrite during a run as a code change and cancels the in-flight
+  query. With reload off you'll need to restart the server manually after
+  editing code, which is fine for a class demo.
+- **`--allow-blocking`** silences the warning some sync paths in
+  `langchain-ollama` raise; the graph runs either way, but the warning
+  is noisy.
+- **Studio's Chat panel will look empty** while the graph runs. That's
+  expected — the graph emits a single `final_plan` dict at the end, not
+  streaming chat messages. Watch the **Graph view** to see nodes light
+  up as they execute, and check the run's final output.
+- **Multi-leg trips run as ONE invocation here.** The per-leg loop lives
+  in `src/main.py`, which Studio bypasses; if you want the multi-leg
+  behaviour (per-leg hotels, inter-leg flights, day renumbering), use
+  the CLI: `uv run python -m src.main "..."`.
+- **Ollama is slow.** A full plan takes 5-10 minutes on `gemma3:12b`. If
+  you've set `OPENAI_API_KEY`, the same query finishes in ~30 seconds.
