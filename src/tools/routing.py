@@ -15,6 +15,7 @@ OSRM with the relevant profiles or configure the Google Maps fallback.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Literal
 
@@ -33,6 +34,14 @@ from src.tools._common import (
 log = logging.getLogger(__name__)
 
 OSRM_BASE = "https://router.project-osrm.org"
+
+# The public OSRM demo server enforces a stricter burst limit than its
+# documented one. Logistics fans out N concurrent route calls via
+# asyncio.gather, which trips HTTP 429 once N exceeds ~3 in flight. Cap
+# concurrency from this process; one retry on 429 absorbs the occasional
+# transient rejection before we give up and burn paid Google quota.
+_OSRM_SEMAPHORE = asyncio.Semaphore(2)
+_OSRM_RETRY_DELAY_S = 1.5
 
 TransportMode = Literal["walk", "drive", "bike", "transit", "taxi"]
 
@@ -69,10 +78,15 @@ async def _route_osrm(
             f"{from_lon},{from_lat};{to_lon},{to_lat}"
         )
         params = {"overview": "false", "alternatives": "false", "steps": "false"}
-        async with http_client() as client:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            payload = resp.json()
+        async with _OSRM_SEMAPHORE:
+            async with http_client() as client:
+                resp = await client.get(url, params=params)
+                if resp.status_code == 429:
+                    log.info("osrm: 429 — retrying after %.1fs", _OSRM_RETRY_DELAY_S)
+                    await asyncio.sleep(_OSRM_RETRY_DELAY_S)
+                    resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                payload = resp.json()
 
         routes = payload.get("routes") or []
         if not routes:
