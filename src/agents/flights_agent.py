@@ -113,9 +113,16 @@ async def _resolve_iata(value: str | None) -> str | None:
     v = value.strip()
     if len(v) == 3 and v.isalpha():
         return v.upper()
-    hit = _CITY_TO_IATA.get(v.lower())
-    if hit:
-        return hit
+    # Country-qualified inputs like "Cartagena, Colombia" come from the
+    # router when it disambiguates ambiguous city names. The dict is keyed
+    # on bare city names, so try the head segment too before LLM fallback.
+    candidates = [v.lower()]
+    if "," in v:
+        candidates.append(v.split(",", 1)[0].strip().lower())
+    for c in candidates:
+        hit = _CITY_TO_IATA.get(c)
+        if hit:
+            return hit
     return await _llm_iata_fallback(v)
 
 

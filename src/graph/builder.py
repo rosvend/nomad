@@ -22,13 +22,18 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
+from src.agents.destination_suggester import destination_suggester_agent
 from src.agents.flights_agent import flights_agent
 from src.agents.food_agent import food_agent
 from src.agents.hotel_agent import hotel_agent
 from src.agents.logistics_agent import logistics_agent
 from src.agents.router import router_agent
 from src.agents.synthesizer import synthesizer_agent
-from src.graph.edges import INITIAL_SPECIALISTS, fan_out_to_specialists
+from src.graph.edges import (
+    INITIAL_SPECIALISTS,
+    fan_out_to_specialists,
+    route_after_router,
+)
 from src.state.trip_state import TripState
 
 
@@ -37,6 +42,7 @@ def build_graph():
     graph = StateGraph(TripState)
 
     graph.add_node("router", router_agent)
+    graph.add_node("destination_suggester", destination_suggester_agent)
     graph.add_node("flights", flights_agent)
     graph.add_node("hotel", hotel_agent)
     graph.add_node("food", food_agent)
@@ -46,6 +52,12 @@ def build_graph():
     graph.add_edge(START, "router")
     graph.add_conditional_edges(
         "router",
+        route_after_router,
+        [*INITIAL_SPECIALISTS, "destination_suggester"],
+    )
+    # Once a destination has been picked, fan out exactly like the router.
+    graph.add_conditional_edges(
+        "destination_suggester",
         fan_out_to_specialists,
         list(INITIAL_SPECIALISTS),
     )

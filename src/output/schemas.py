@@ -107,6 +107,24 @@ class LogisticsLeg(BaseModel):
     notes: str | None = None
 
 
+class LegPlan(BaseModel):
+    """One destination's worth of plan inside a multi-city trip.
+
+    Single-destination trips leave `TravelPlan.legs` empty and use the
+    top-level fields. Multi-leg trips populate `TravelPlan.legs` with one
+    entry per city; flights stay top-level (covering origin→leg1, every
+    inter-leg hop, and leg-N→origin).
+    """
+
+    destination: str
+    dates: dict[str, str] | None = None
+    user_lodging: str | None = None
+    hotels: list[Hotel] = Field(default_factory=list)
+    restaurants: list[Restaurant] = Field(default_factory=list)
+    itinerary: list[ItineraryStop] = Field(default_factory=list)
+    logistics: list[LogisticsLeg] = Field(default_factory=list)
+
+
 class TravelPlan(BaseModel):
     """The final structured artifact returned to the user."""
 
@@ -121,6 +139,12 @@ class TravelPlan(BaseModel):
     restaurants: list[Restaurant] = Field(default_factory=list)
     itinerary: list[ItineraryStop] = Field(default_factory=list)
     logistics: list[LogisticsLeg] = Field(default_factory=list)
+
+    # Populated only for multi-city trips. Empty list = single-leg trip,
+    # in which case the top-level hotels/restaurants/itinerary/logistics
+    # fields cover the whole trip.
+    legs: list[LegPlan] = Field(default_factory=list)
+    destination_was_inferred: bool = False
 
     summary: str | None = None
     errors: list[dict] = Field(default_factory=list)

@@ -13,6 +13,42 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class Leg(BaseModel):
+    """One destination in a multi-city trip.
+
+    Single-destination prompts produce a one-element `legs` list.
+    """
+
+    destination: str = Field(
+        description="City name for this leg (e.g. 'Bogota')."
+    )
+    start: str | None = Field(
+        default=None,
+        description=(
+            "Leg start date as YYYY-MM-DD. Null if the user only gave a "
+            "duration (e.g. '3 days in Bogota') without an explicit anchor."
+        ),
+    )
+    end: str | None = Field(
+        default=None,
+        description="Leg end date as YYYY-MM-DD. Null if not derivable.",
+    )
+    days: int | None = Field(
+        default=None, ge=1, le=60,
+        description=(
+            "Number of days the user wants to spend on this leg. Use this "
+            "when start/end aren't given but the user said e.g. '3 days in X'."
+        ),
+    )
+    lodging: str | None = Field(
+        default=None,
+        description=(
+            "Per-leg lodging override if the user mentioned a specific "
+            "address/place for this leg. Otherwise null."
+        ),
+    )
+
+
 class RouterOutput(BaseModel):
     """Structured trip parameters extracted from a user's natural-language query."""
 
@@ -28,7 +64,19 @@ class RouterOutput(BaseModel):
         default=None,
         description=(
             "Where the traveler is going. City name preferred "
-            "(e.g. 'Tokyo'). Null if the user didn't specify."
+            "(e.g. 'Tokyo'). Null if the user didn't specify. For "
+            "multi-city trips, set this to the FIRST destination and put "
+            "the full sequence in `legs`."
+        ),
+    )
+    legs: list[Leg] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of destinations the user wants to visit. For a "
+            "single-city trip, return ONE leg. For multi-city trips like "
+            "'3 days in Bogota then 4 days in Cartagena', return one Leg "
+            "per city in the order the user said them. If the user didn't "
+            "name any destination, return an empty list."
         ),
     )
     dates: dict[str, str] | None = Field(
@@ -37,7 +85,8 @@ class RouterOutput(BaseModel):
             "Trip dates as {\"start\": \"YYYY-MM-DD\", \"end\": \"YYYY-MM-DD\"}. "
             "Resolve relative phrases (\"next week\", \"5-day trip\") against "
             "TODAY's date which is provided in the prompt. Null if the user "
-            "gave no temporal hint."
+            "gave no temporal hint. For multi-city trips, set this to the "
+            "OVERALL window (start of first leg → end of last leg)."
         ),
     )
     travelers: int = Field(

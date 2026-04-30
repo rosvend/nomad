@@ -27,6 +27,21 @@ def fan_out_to_specialists(state: TripState) -> list[Send]:
     return [Send(node, state) for node in INITIAL_SPECIALISTS]
 
 
+def route_after_router(state: TripState) -> str | list[Send]:
+    """Route to the destination_suggester if the router couldn't extract any
+    destination but the user did express preferences. Otherwise fan out to
+    specialists as usual.
+
+    Returning ``"destination_suggester"`` triggers the suggester node;
+    returning a list of ``Send`` objects fires the parallel fan-out.
+    """
+    has_dest = bool(state.get("destination") or (state.get("legs") or []))
+    has_prefs = bool(state.get("preferences") or [])
+    if not has_dest and has_prefs:
+        return "destination_suggester"
+    return fan_out_to_specialists(state)
+
+
 def has_errors(state: TripState) -> bool:
     """Edge predicate stub for future fallback routing."""
     return bool(state.get("errors"))

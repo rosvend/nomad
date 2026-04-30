@@ -112,7 +112,7 @@ Write a concise 3-5 sentence travel summary blurb for the trip described
 below. Mention the destination, dates if present, the chosen hotel, and
 1-2 highlights from the attractions or cuisine. Tone: warm and useful,
 not marketing copy. Plain prose only — no markdown, no bullet points.
-
+{inferred_note}
 Trip:
 - Destination: {destination}
 - Dates: {dates}
@@ -149,7 +149,17 @@ async def _generate_summary(
     attractions = _pick_attractions(state)
     top_attraction = attractions[0]["name"] if attractions else "—"
 
+    inferred_note = ""
+    if state.get("destination_was_inferred"):
+        inferred_note = (
+            f"\nIMPORTANT: The user did not name a destination. We picked "
+            f"{plan.destination} based on their preferences. Open the "
+            f"summary by acknowledging that you chose {plan.destination} "
+            f"for them and briefly say why.\n"
+        )
+
     prompt = _SUMMARY_PROMPT.format(
+        inferred_note=inferred_note,
         destination=plan.destination,
         dates=plan.dates or "(unspecified)",
         travelers=plan.travelers,
@@ -218,11 +228,16 @@ async def synthesizer_agent(state: TripState) -> dict:
         restaurants=restaurants,
         itinerary=itinerary,
         logistics=logistics,
+        destination_was_inferred=bool(state.get("destination_was_inferred")),
         errors=[*state.get("errors", []), *e1, *e2, *e3, *e4, *e5, *e_dates],
     )
 
-    # Optional narrative summary on top.
-    plan.summary = await _generate_summary(plan, itinerary_dicts, state)
+    # Optional narrative summary on top. Skipped for per-leg runs in
+    # multi-city trips — the orchestrator writes one trip-level summary.
+    if state.get("skip_summary"):
+        plan.summary = None
+    else:
+        plan.summary = await _generate_summary(plan, itinerary_dicts, state)
 
     log.info(
         "synthesizer: plan ready — %d itinerary stops, summary=%s",

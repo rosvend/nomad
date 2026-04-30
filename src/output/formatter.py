@@ -39,26 +39,58 @@ def to_markdown(plan: TravelPlan) -> str:
     lines.append(_flights_section(plan.flights))
     lines.append("")
 
-    if plan.user_lodging:
-        lines.append("## Lodging")
-        lines.append(f"_Provided by user: {plan.user_lodging}_")
-        lines.append("")
+    if plan.legs:
+        # Multi-leg trip — render one block per destination.
+        for i, leg in enumerate(plan.legs, 1):
+            lines.append(f"# Leg {i} — {leg.destination}")
+            if leg.dates:
+                lines.append(
+                    f"_Dates: {leg.dates.get('start')} → {leg.dates.get('end')}_"
+                )
+            lines.append("")
+
+            if leg.user_lodging:
+                lines.append("## Lodging")
+                lines.append(f"_Provided by user: {leg.user_lodging}_")
+                lines.append("")
+            else:
+                lines.append("## Hotels")
+                lines.append(_hotels_section(leg.hotels))
+                lines.append("")
+
+            lines.append("## Restaurants")
+            lines.append(_restaurants_section(leg.restaurants))
+            lines.append("")
+
+            lines.append("## Itinerary")
+            lines.append(_itinerary_section(leg.itinerary))
+            lines.append("")
+
+            lines.append("## Logistics")
+            lines.append(_logistics_section(leg.logistics))
+            lines.append("")
     else:
-        lines.append("## Hotels")
-        lines.append(_hotels_section(plan.hotels))
+        # Single-leg trip — unchanged layout.
+        if plan.user_lodging:
+            lines.append("## Lodging")
+            lines.append(f"_Provided by user: {plan.user_lodging}_")
+            lines.append("")
+        else:
+            lines.append("## Hotels")
+            lines.append(_hotels_section(plan.hotels))
+            lines.append("")
+
+        lines.append("## Restaurants")
+        lines.append(_restaurants_section(plan.restaurants))
         lines.append("")
 
-    lines.append("## Restaurants")
-    lines.append(_restaurants_section(plan.restaurants))
-    lines.append("")
+        lines.append("## Itinerary")
+        lines.append(_itinerary_section(plan.itinerary))
+        lines.append("")
 
-    lines.append("## Itinerary")
-    lines.append(_itinerary_section(plan.itinerary))
-    lines.append("")
-
-    lines.append("## Logistics")
-    lines.append(_logistics_section(plan.logistics))
-    lines.append("")
+        lines.append("## Logistics")
+        lines.append(_logistics_section(plan.logistics))
+        lines.append("")
 
     if plan.errors:
         lines.append("## Errors")

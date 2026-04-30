@@ -39,23 +39,58 @@ schema. Do not include prose, markdown fences, or commentary.
 
 TODAY'S DATE: {today}
 
-ORIGIN / DESTINATION
+ORIGIN / DESTINATION / LEGS
 The user's request may use any of these phrasings:
-- "from medellin to bogota"           → origin=medellin, destination=bogota
-- "medellin to bogota"                → origin=medellin, destination=bogota
-- "trip to bogota from medellin"      → origin=medellin, destination=bogota
-- "fly to Tokyo"                      → origin=null, destination=Tokyo
-- "NYC to LAX"                        → origin=NYC, destination=LAX (IATA-like)
+- "from medellin to bogota"           → origin=medellin, legs=[{{bogota}}]
+- "medellin to bogota"                → origin=medellin, legs=[{{bogota}}]
+- "trip to bogota from medellin"      → origin=medellin, legs=[{{bogota}}]
+- "fly to Tokyo"                      → origin=null, legs=[{{Tokyo}}]
+- "NYC to LAX"                        → origin=NYC, legs=[{{LAX}}]
 
 When the query contains TWO `from` clauses (one for cities, one for dates),
 the first `from <X> to <Y>` is the city pair and the second `from <date> to
 <date>` is the dates. Example:
   "from medellin to bogota from may 27th to may 30th 2026"
-    → origin=medellin, destination=bogota,
-      dates={{"start": "2026-05-27", "end": "2026-05-30"}}
+    → origin=medellin, legs=[{{destination=bogota, start=2026-05-27,
+      end=2026-05-30}}], dates={{"start": "2026-05-27", "end": "2026-05-30"}}
 
-If the user did not specify origin/destination, leave them null — do NOT
-invent one.
+MULTI-CITY TRIPS
+If the user names more than one destination, return ONE entry in `legs`
+per destination, in the order they said them. Set `destination` to the
+FIRST leg's city for back-compat. Examples:
+- "trip starting in Medellin. 3 days in Bogota, then 4 days in Cartagena
+   before flying back, starting May 15"
+    → origin=Medellin,
+      legs=[
+        {{destination=Bogota,    start=2026-05-15, end=2026-05-17, days=3}},
+        {{destination=Cartagena, start=2026-05-18, end=2026-05-21, days=4}},
+      ],
+      destination=Bogota,
+      dates={{"start": "2026-05-15", "end": "2026-05-21"}}
+- "Tokyo for a week then Kyoto for 3 days"
+    → legs=[
+        {{destination=Tokyo, days=7}},
+        {{destination=Kyoto, days=3}},
+      ],
+      destination=Tokyo
+When per-leg dates are derivable from a global start + day counts,
+distribute them sequentially with no gap (leg N+1 starts on leg N's end+1).
+
+If the user did not specify origin/destination, leave origin null and
+return an EMPTY legs list — do NOT invent destinations.
+
+DISAMBIGUATING CITY NAMES
+Many city names exist in multiple countries (Cartagena → Colombia AND
+Spain; Cordoba → Argentina AND Spain; Santiago → Chile AND Spain;
+Granada → Spain AND Nicaragua). When the surrounding context makes the
+country unambiguous, append it explicitly to the destination string so
+downstream geocoding hits the right city. Example:
+  "trip starting in Medellin. 3 days in Bogota, then 4 days in Cartagena"
+    → legs=[{{destination="Bogota, Colombia"}},
+            {{destination="Cartagena, Colombia"}}]
+Do this whenever the origin or the OTHER destinations clearly identify
+a country. If a city name is unique or context is missing, use the
+plain name.
 
 DATES (resolve relative to TODAY's date above)
 - "next week"                         → start = today + 7 days
@@ -186,14 +221,17 @@ def _defaults_from(state: TripState) -> dict:
     pre-fills state still works in offline mode.
     """
     settings = get_settings()
+    dest = state.get("destination")
+    legs = state.get("legs") or ([{"destination": dest}] if dest else [])
     return {
         "origin": state.get("origin") or settings.default_origin,
-        "destination": state.get("destination"),
+        "destination": dest,
         "dates": state.get("dates"),
         "travelers": state.get("travelers") or 1,
         "budget_tier": state.get("budget_tier") or "mid",
         "preferences": state.get("preferences") or [],
         "user_lodging": state.get("user_lodging"),
+        "legs": legs,
     }
 
 
@@ -212,17 +250,88 @@ def _clean_user_lodging(raw: str | None) -> str | None:
     return s
 
 
+def _normalize_legs(parsed: RouterOutput) -> list[dict]:
+    """Convert RouterOutput.legs (Pydantic) into TripState legs (dicts) and
+    fill missing per-leg start/end from the overall window + day counts.
+
+    Rules:
+    - If parsed.legs is empty but parsed.destination is set, synthesize
+      one leg from destination + parsed.dates.
+    - If a leg has explicit start/end, use them.
+    - If a leg has only `days` and we know the previous leg's end (or the
+      overall start for the first leg), derive its start = prev.end + 1
+      (or overall start), end = start + days - 1.
+    - Otherwise leave start/end null and let the synthesizer default.
+    """
+    legs_raw = list(parsed.legs or [])
+    if not legs_raw and parsed.destination:
+        legs_raw = [type("L", (), {  # minimal stand-in
+            "destination": parsed.destination,
+            "start": (parsed.dates or {}).get("start"),
+            "end": (parsed.dates or {}).get("end"),
+            "days": None,
+            "lodging": None,
+        })()]
+
+    overall_start = (parsed.dates or {}).get("start") if parsed.dates else None
+    legs: list[dict] = []
+    cursor: date | None = None
+    if overall_start:
+        try:
+            cursor = date.fromisoformat(overall_start)
+        except ValueError:
+            cursor = None
+
+    for i, leg in enumerate(legs_raw):
+        leg_start = getattr(leg, "start", None)
+        leg_end = getattr(leg, "end", None)
+        leg_days = getattr(leg, "days", None)
+
+        if leg_start and not leg_end and leg_days:
+            try:
+                s = date.fromisoformat(leg_start)
+                leg_end = (s + timedelta(days=max(0, leg_days - 1))).isoformat()
+            except ValueError:
+                pass
+        elif not leg_start and leg_days and cursor is not None:
+            s = cursor if i == 0 else cursor + timedelta(days=1)
+            e = s + timedelta(days=max(0, leg_days - 1))
+            leg_start, leg_end = s.isoformat(), e.isoformat()
+
+        # Advance cursor for next leg.
+        if leg_end:
+            try:
+                cursor = date.fromisoformat(leg_end)
+            except ValueError:
+                pass
+
+        legs.append({
+            "destination": getattr(leg, "destination", None),
+            "start": leg_start,
+            "end": leg_end,
+            "days": leg_days,
+            "lodging": getattr(leg, "lodging", None),
+        })
+
+    return [l for l in legs if l.get("destination")]
+
+
 def _merge_with_state(parsed: RouterOutput, state: TripState) -> dict:
     """Caller-provided state wins; LLM fills gaps."""
     settings = get_settings()
+    legs = state.get("legs") or _normalize_legs(parsed)
+    # Mirror first leg into scalar `destination` for back-compat with any
+    # caller that pre-populated state.destination.
+    first_leg_dest = legs[0]["destination"] if legs else None
     return {
         "origin": state.get("origin") or parsed.origin or settings.default_origin,
-        "destination": state.get("destination") or parsed.destination,
+        "destination": state.get("destination") or parsed.destination or first_leg_dest,
         "dates": state.get("dates") or parsed.dates,
         "travelers": state.get("travelers") or parsed.travelers,
         "budget_tier": state.get("budget_tier") or parsed.budget_tier,
         "preferences": state.get("preferences") or _clean_preferences(parsed.preferences),
         "user_lodging": state.get("user_lodging") or _clean_user_lodging(parsed.user_lodging),
+        "legs": legs,
     }
 
 
@@ -275,9 +384,10 @@ async def router_agent(state: TripState) -> dict:
     parsed = _regex_backfill(raw_query, parsed)
 
     log.info(
-        "router: parsed origin=%r destination=%r dates=%r tier=%r prefs=%s lodging=%r",
-        parsed.origin, parsed.destination, parsed.dates,
-        parsed.budget_tier, parsed.preferences, parsed.user_lodging,
+        "router: parsed origin=%r destination=%r legs=%s dates=%r tier=%r prefs=%s lodging=%r",
+        parsed.origin, parsed.destination,
+        [l.destination for l in (parsed.legs or [])],
+        parsed.dates, parsed.budget_tier, parsed.preferences, parsed.user_lodging,
     )
 
     out = _merge_with_state(parsed, state)
