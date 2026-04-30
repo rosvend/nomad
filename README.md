@@ -99,27 +99,3 @@ minutes Ollama needs.
 ```bash
 uv run langgraph dev --no-reload --allow-blocking
 ```
-
-This opens LangGraph Studio against the compiled graph from
-`src/graph/builder.py:build_graph` so you can step through agent
-execution interactively.
-
-A few caveats worth knowing before the demo:
-
-- **`--no-reload` is recommended.** Without it, `watchfiles` treats every
-  `.pyc` rewrite during a run as a code change and cancels the in-flight
-  query. With reload off you'll need to restart the server manually after
-  editing code, which is fine for a class demo.
-- **`--allow-blocking`** silences the warning some sync paths in
-  `langchain-ollama` raise; the graph runs either way, but the warning
-  is noisy.
-- **Studio's Chat panel will look empty** while the graph runs. That's
-  expected — the graph emits a single `final_plan` dict at the end, not
-  streaming chat messages. Watch the **Graph view** to see nodes light
-  up as they execute, and check the run's final output.
-- **Multi-leg trips run as ONE invocation here.** The per-leg loop lives
-  in `src/main.py`, which Studio bypasses; if you want the multi-leg
-  behaviour (per-leg hotels, inter-leg flights, day renumbering), use
-  the CLI: `uv run python -m src.main "..."`.
-- **Ollama is slow.** A full plan takes 5-10 minutes on `gemma3:12b`. If
-  you've set `OPENAI_API_KEY`, the same query finishes in ~30 seconds.
