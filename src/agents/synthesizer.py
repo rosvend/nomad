@@ -89,6 +89,24 @@ def _attractions_from_logistics(
     return out
 
 
+def _pick_attractions(state: TripState) -> list[dict[str, Any]]:
+    """Prefer the pool food_agent wrote to state; fall back to extracting
+    attractions out of logistics legs (older behaviour, kept for safety)."""
+    direct = state.get("attractions") or []
+    if direct:
+        seen: set[str] = set()
+        out: list[dict[str, Any]] = []
+        for a in direct:
+            name = a.get("name")
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            out.append(a)
+        if out:
+            return out
+    return _attractions_from_logistics(state.get("logistics"))
+
+
 _SUMMARY_PROMPT = """\
 Write a concise 3-5 sentence travel summary blurb for the trip described
 below. Mention the destination, dates if present, the chosen hotel, and
@@ -128,7 +146,7 @@ async def _generate_summary(
     else:
         top_hotel = "(none chosen)"
     top_restaurant = plan.restaurants[0].name if plan.restaurants else "—"
-    attractions = _attractions_from_logistics(state.get("logistics"))
+    attractions = _pick_attractions(state)
     top_attraction = attractions[0]["name"] if attractions else "—"
 
     prompt = _SUMMARY_PROMPT.format(
@@ -177,7 +195,7 @@ async def synthesizer_agent(state: TripState) -> dict:
         })
 
     # Itinerary skeleton — algorithmic distribution, no LLM.
-    attractions = _attractions_from_logistics(state.get("logistics"))
+    attractions = _pick_attractions(state)
     itinerary_dicts = build_itinerary(
         dates=state.get("dates"),
         restaurants=[

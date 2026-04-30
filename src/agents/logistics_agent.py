@@ -7,7 +7,9 @@ Pipeline
    centroid fallback.
 2. Build a stop list:
      - top N restaurants from `state["restaurants"]` (in-rank order)
-     - top M attractions discovered via Overpass (around the start)
+     - up to M attractions: prefer the pool food_agent already wrote to
+       `state["attractions"]`; only fetch our own via Overpass if state
+       is empty (food may have errored).
 3. Compute a walking route from start → each stop in parallel via
    `get_route` (OSRM). Failed routes are kept with a `notes` field
    explaining why; the agent never raises.
@@ -19,7 +21,7 @@ Graph contract: this node has incoming edges from both `hotel` and
 this agent. That's why we can read `state["hotels"]` and
 `state["restaurants"]` here even though they didn't exist when Router ran.
 
-Reads:  destination, hotels, restaurants
+Reads:  destination, dates, hotels, restaurants, attractions
 Writes: logistics, errors
 """
 
@@ -27,6 +29,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+from datetime import date
 from typing import Any
 
 from src.state.trip_state import TripState
@@ -37,10 +41,35 @@ log = logging.getLogger(__name__)
 # ── Tunables ─────────────────────────────────────────────────────────
 
 MAX_RESTAURANTS = 3              # cap restaurants in stop list
-MAX_ATTRACTIONS = 3              # cap attractions in stop list
-ATTRACTION_RADIUS_M = 5000       # how far to look for attractions
-DEFAULT_MODE = "walk"            # OSRM public demo only ships car-speed,
-                                 # so this is "best-effort" walking.
+MIN_ATTRACTIONS = 6              # floor for attractions in stop list
+ATTRACTION_RADIUS_M = 5000       # how far to look for attractions when we
+                                 # have to fetch our own
+DEFAULT_MODE = "walk"            # routing.py recomputes walking duration
+                                 # from distance since OSRM demo only ships
+                                 # the car profile.
+
+
+def _attractions_to_visit(num_days: int) -> int:
+    """How many attractions the itinerary can absorb for an N-day trip.
+
+    Middle days each consume 2 (morning + afternoon); the arrival day has
+    none and the departure day has one. We add a slack so the synthesizer
+    has spares when it sorts/dedupes by distance.
+    """
+    middle = max(0, num_days - 2)
+    departure = 1 if num_days > 1 else 0
+    target = 2 * middle + departure
+    return max(MIN_ATTRACTIONS, target + 2)
+
+
+def _trip_num_days(state: TripState) -> int:
+    dates = state.get("dates") or {}
+    try:
+        start = date.fromisoformat(dates["start"])
+        end = date.fromisoformat(dates["end"])
+        return max(1, (end - start).days + 1)
+    except (KeyError, TypeError, ValueError):
+        return 3
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -114,14 +143,15 @@ def _restaurant_stops(state: TripState) -> list[dict[str, Any]]:
     return out
 
 
-async def _fetch_attractions(lat: float, lon: float) -> list[dict[str, Any]]:
-    """Pull a small set of nearby tourist attractions via Overpass."""
+async def _fetch_attractions(lat: float, lon: float, want: int) -> list[dict[str, Any]]:
+    """Pull nearby tourist attractions via Overpass — only used when state
+    didn't already supply a pool from the food agent."""
     res = await search_pois.ainvoke({
         "lat": lat, "lon": lon,
         "category": "attraction",
         "radius_m": ATTRACTION_RADIUS_M,
         # Over-fetch so that filtering for valid coords still yields enough.
-        "limit": MAX_ATTRACTIONS * 2,
+        "limit": want * 2,
     })
     if not res["ok"]:
         log.info("logistics: attractions lookup failed (%s)", res.get("error_type"))
@@ -132,9 +162,43 @@ async def _fetch_attractions(lat: float, lon: float) -> list[dict[str, Any]]:
             "name": p.get("name") or "(attraction)",
             "lat": p["lat"],
             "lon": p["lon"],
+            "address": p.get("address"),
             "category": "attraction",
         }
-        for p in valid[:MAX_ATTRACTIONS]
+        for p in valid[:want]
+    ]
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Approximate great-circle distance in km — used to pick the closest
+    attractions out of the food-agent pool without a routing call."""
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def _attractions_from_state(
+    state: TripState,
+    start_lat: float,
+    start_lon: float,
+    want: int,
+) -> list[dict[str, Any]]:
+    """Take the food-agent pool and pick the closest `want` to the start."""
+    pool = state.get("attractions") or []
+    valid = [a for a in pool if _has_coords(a) and a.get("name")]
+    valid.sort(key=lambda a: _haversine_km(start_lat, start_lon, a["lat"], a["lon"]))
+    return [
+        {
+            "name": a.get("name") or "(attraction)",
+            "lat": a["lat"],
+            "lon": a["lon"],
+            "address": a.get("address"),
+            "category": "attraction",
+        }
+        for a in valid[:want]
     ]
 
 
@@ -214,16 +278,24 @@ async def logistics_agent(state: TripState) -> dict:
         start["name"], start["kind"], start["lat"], start["lon"],
     )
 
-    # Build stop list. Restaurants come from upstream agents; attractions
-    # we fetch ourselves so the agent stays useful even if Food returned
-    # nothing (e.g. it errored, or the destination has no tagged restaurants).
+    # Build stop list. Restaurants come from upstream agents. For attractions,
+    # prefer the pool food_agent already wrote to state (~15 items); only
+    # call Overpass ourselves when state is empty (food may have errored).
     rest_stops = _restaurant_stops(state)
-    attr_stops = await _fetch_attractions(start["lat"], start["lon"])
+    want_attractions = _attractions_to_visit(_trip_num_days(state))
+
+    attr_stops = _attractions_from_state(state, start["lat"], start["lon"], want_attractions)
+    attr_source = "state"
+    if not attr_stops:
+        attr_stops = await _fetch_attractions(start["lat"], start["lon"], want_attractions)
+        attr_source = "overpass"
     all_stops = rest_stops + attr_stops
 
     log.info(
-        "logistics: %d restaurant stop(s) from state, %d attraction stop(s) from Overpass",
-        len(rest_stops), len(attr_stops),
+        "logistics: %d restaurant stop(s) from state, %d attraction stop(s) from %s "
+        "(target=%d for %d-day trip)",
+        len(rest_stops), len(attr_stops), attr_source,
+        want_attractions, _trip_num_days(state),
     )
 
     if not all_stops:

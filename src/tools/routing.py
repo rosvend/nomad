@@ -45,6 +45,14 @@ _OSRM_PROFILE: dict[TransportMode, str] = {
     "transit": "car",
 }
 
+# The public OSRM demo only ships the `car` profile, so durations come back
+# at car speed even when we ask for foot/bike. Distances are still road-network
+# shortest-path, so we re-derive duration from distance for non-driving modes.
+_AVG_KMH_BY_MODE: dict[TransportMode, float] = {
+    "walk": 5.0,
+    "bike": 15.0,
+}
+
 
 async def _route_osrm(
     from_lat: float,
@@ -71,14 +79,24 @@ async def _route_osrm(
             return error_result("osrm", "no_results", "No route found")
 
         r = routes[0]
+        distance_km = round(r["distance"] / 1000, 2)
+        avg_kmh = _AVG_KMH_BY_MODE.get(mode)
+        if avg_kmh and distance_km > 0:
+            # OSRM demo returned car-speed duration; recompute from distance.
+            duration_min = round(distance_km / avg_kmh * 60, 1)
+            duration_note = "estimated_from_distance"
+        else:
+            duration_min = round(r["duration"] / 60, 1)
+            duration_note = None
         return ok_result(
             "osrm",
             {
                 "from_stop": f"{from_lat},{from_lon}",
                 "to_stop": f"{to_lat},{to_lon}",
                 "mode": mode,
-                "duration_minutes": round(r["duration"] / 60, 1),
-                "distance_km": round(r["distance"] / 1000, 2),
+                "duration_minutes": duration_min,
+                "distance_km": distance_km,
+                "duration_note": duration_note,
                 "instructions_url": (
                     f"https://www.openstreetmap.org/directions?"
                     f"engine=fossgis_osrm_{profile}"

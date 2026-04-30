@@ -14,9 +14,10 @@ Algorithm
 - Day N (departure)            : 10:00 attraction · 13:00 lunch · check-out note
 
 Resources are consumed in the order provided (which the upstream agents
-already ranked). When we run out of attractions or restaurants, we wrap
-back to the start of the list — better to repeat a great place than
-leave a slot empty.
+already ranked). Attractions are placed exactly once — if the pool is
+shorter than the number of slots, remaining slots become "Free time"
+rather than repeats. Restaurants still wrap (eating at a great place
+twice over a trip is fine).
 """
 
 from __future__ import annotations
@@ -46,10 +47,24 @@ def _num_days(dates: dict[str, str] | None, default: int = 3) -> int:
     return max(1, (end - start).days + 1)
 
 
-def _pick(items: list[dict[str, Any]], index: int) -> dict[str, Any] | None:
+def _pick(items: list[dict[str, Any]], index: int, *, wrap: bool) -> dict[str, Any] | None:
     if not items:
         return None
-    return items[index % len(items)]
+    if wrap:
+        return items[index % len(items)]
+    if index >= len(items):
+        return None
+    return items[index]
+
+
+def _free_time_stop(day: int, when: datetime, notes: str) -> dict[str, Any]:
+    return _stop(
+        name="Free time / explore the area",
+        day=day,
+        when=when,
+        duration_minutes=120,
+        notes=notes,
+    )
 
 
 def _stop(
@@ -101,13 +116,15 @@ def build_itinerary(
 
     def _next_rest() -> dict[str, Any] | None:
         nonlocal rest_i
-        item = _pick(restaurants, rest_i)
+        # Restaurants may wrap — repeating a great spot is fine.
+        item = _pick(restaurants, rest_i, wrap=True)
         rest_i += 1
         return item
 
     def _next_attr() -> dict[str, Any] | None:
         nonlocal attr_i
-        item = _pick(attractions, attr_i)
+        # Attractions don't wrap — None signals "leave a free-time slot".
+        item = _pick(attractions, attr_i, wrap=False)
         attr_i += 1
         return item
 
@@ -151,6 +168,10 @@ def build_itinerary(
                     address=a.get("address"),
                     notes="Morning visit",
                 ))
+            else:
+                out.append(_free_time_stop(
+                    day, _ts(d, 10, 0), "Open morning before departure"
+                ))
             r = _next_rest()
             if r:
                 out.append(_stop(
@@ -182,6 +203,10 @@ def build_itinerary(
                 address=a1.get("address"),
                 notes="Morning attraction",
             ))
+        else:
+            out.append(_free_time_stop(
+                day, _ts(d, 10, 0), "Open slot — wander, rest, or revisit a favourite"
+            ))
         r1 = _next_rest()
         if r1:
             out.append(_stop(
@@ -201,6 +226,10 @@ def build_itinerary(
                 duration_minutes=150,
                 address=a2.get("address"),
                 notes="Afternoon attraction",
+            ))
+        else:
+            out.append(_free_time_stop(
+                day, _ts(d, 15, 0), "Open slot — wander, rest, or revisit a favourite"
             ))
         r2 = _next_rest()
         if r2:

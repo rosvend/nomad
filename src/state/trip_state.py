@@ -33,6 +33,10 @@ class TripState(TypedDict, total=False):
     flights: Annotated[list[dict[str, Any]], operator.add]  # Flight Agent
     hotels: Annotated[list[dict[str, Any]], operator.add]  # Hotel Agent
     restaurants: Annotated[list[dict[str, Any]], operator.add]  # Food Agent
+    attractions: Annotated[list[dict[str, Any]], operator.add]  # Food agent writes
+                                                                # the pool from Overpass;
+                                                                # Logistics & Synthesizer
+                                                                # consume it.
     itinerary_stops: Annotated[list[dict[str, Any]], operator.add]  # Food/Logistics
     logistics: Annotated[list[dict[str, Any]], operator.add]  # Logistics Agent
 

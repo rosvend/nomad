@@ -23,7 +23,8 @@ Pipeline
 5. Sort descending by composite score; return at least 3.
 
 Reads:  destination, preferences, budget_tier
-Writes: restaurants (list of dicts), errors (on failures)
+Writes: restaurants, attractions (shared pool fetched here for proximity
+        scoring; logistics + synthesizer consume it), errors (on failures)
 """
 
 from __future__ import annotations
@@ -83,6 +84,29 @@ _CUISINE_VOCAB: frozenset[str] = frozenset({
     "cafe", "bakery", "dessert", "ice_cream",
 })
 
+# Fallback hints when the OSM `cuisine` tag is missing — we look for these
+# substrings in the restaurant name. Keep small and obvious; a name match
+# only confirms intent, never overrides a present-but-different OSM tag.
+_CUISINE_NAME_HINTS: dict[str, tuple[str, ...]] = {
+    "vegetarian": ("vegetarian", "vegetariano", "vegetariana", "veggie", "veg "),
+    "vegan":      ("vegan", "vegano", "vegana", "plant-based", "plant based"),
+}
+
+# Names that strongly imply meat-only menus. Used to hard-exclude obviously
+# inappropriate places when the user has a vegetarian/vegan preference. The
+# user can still get them surfaced for non-restricted searches.
+_MEAT_KEYWORDS_NAME: tuple[str, ...] = (
+    "chicken", "pollo", "cangrejo", "crab", "seafood", "mariscos",
+    "pescaderia", "pescadería", "pescados", "fish",
+    "bbq", "barbecue", "parrilla", "asadero", "asados",
+    "steak", "steakhouse", "carne", "carnes", "pork", "cerdo",
+    "ribs", "rotisserie", "wings", "alitas",
+)
+_MEAT_CUISINE_TAGS: frozenset[str] = frozenset({
+    "steak_house", "barbecue", "chicken", "seafood", "fish",
+})
+_DIETARY_RESTRICTED: frozenset[str] = frozenset({"vegetarian", "vegan"})
+
 
 # ── Preference parsing & cuisine matching ───────────────────────────
 
@@ -108,22 +132,59 @@ def _split_cuisine(cuisine_str: str | None) -> set[str]:
     }
 
 
-def _cuisine_match_score(place_cuisine: str | None, prefs: set[str]) -> float:
-    """1.0 on direct overlap, 0.5 on substring partial match, 0.0 otherwise.
+def _name_matches_pref(name: str | None, prefs: set[str]) -> bool:
+    """Look for cuisine-pref hint substrings in a restaurant name.
+
+    OSM `cuisine` tags are often missing, so a place literally named
+    "Restaurante Vegetariano" deserves credit even with no tag.
+    """
+    if not name:
+        return False
+    lowered = name.lower()
+    for pref in prefs:
+        for hint in _CUISINE_NAME_HINTS.get(pref, ()):
+            if hint in lowered:
+                return True
+    return False
+
+
+def _cuisine_match_score(
+    place_cuisine: str | None,
+    prefs: set[str],
+    *,
+    name: str | None = None,
+) -> float:
+    """1.0 on tag/name overlap, 0.5 on partial or unknown, 0.0 on conflict.
     Returns 0.5 (neutral) when the user expressed no cuisine preference at all.
     """
     if not prefs:
         return 0.5
     place_terms = _split_cuisine(place_cuisine)
-    if not place_terms:
-        return 0.0
     if place_terms & prefs:
         return 1.0
+    if _name_matches_pref(name, prefs):
+        return 1.0
+    if not place_terms:
+        # No tag and no name hint — neutral, not a penalty. Otherwise an
+        # unrelated tagged cuisine outranks every untagged candidate.
+        return 0.5
     for pref in prefs:
         for term in place_terms:
             if pref in term or term in pref:
                 return 0.5
     return 0.0
+
+
+def _is_meat_only(candidate: dict[str, Any]) -> bool:
+    """Heuristic: name or OSM cuisine tag strongly implies a meat-only menu."""
+    name = (candidate.get("name") or "").lower()
+    cuisine = (candidate.get("cuisine") or "").lower()
+    if any(kw in name for kw in _MEAT_KEYWORDS_NAME):
+        return True
+    cuisine_terms = _split_cuisine(cuisine)
+    if cuisine_terms & _MEAT_CUISINE_TAGS:
+        return True
+    return False
 
 
 # ── Enrichment ───────────────────────────────────────────────────────
@@ -277,19 +338,42 @@ async def food_agent(state: TripState) -> dict:
         }
 
     if attr_result["ok"]:
-        attraction_positions = [
-            (a["lat"], a["lon"])
+        attractions_pool = [
+            {
+                "name": a.get("name") or "(attraction)",
+                "lat": a.get("lat"),
+                "lon": a.get("lon"),
+                "address": a.get("address"),
+            }
             for a in attr_result["data"]
-            if a.get("lat") is not None and a.get("lon") is not None
+            if a.get("name")
+            and a.get("name") != "(unnamed)"
+            and a.get("lat") is not None
+            and a.get("lon") is not None
         ]
+        attraction_positions = [(a["lat"], a["lon"]) for a in attractions_pool]
     else:
         log.info("food: no attractions found — proximity score will be neutral")
+        attractions_pool = []
         attraction_positions = []
 
     log.info(
         "food: %d candidates from Overpass, %d attractions for proximity",
         len(candidates), len(attraction_positions),
     )
+
+    # Hard-exclude obvious meat venues when user has dietary restrictions.
+    # Soft signals (rating/popularity) easily push a "Tropical Chicken"-type
+    # place to the top otherwise.
+    if cuisine_prefs & _DIETARY_RESTRICTED:
+        before = len(candidates)
+        candidates = [c for c in candidates if not _is_meat_only(c)]
+        excluded = before - len(candidates)
+        if excluded:
+            log.info(
+                "food: excluded %d meat-only candidate(s) for %s prefs",
+                excluded, sorted(cuisine_prefs & _DIETARY_RESTRICTED),
+            )
 
     # 3 — enrich top-N with Places API (parallel)
     to_enrich = candidates[:MAX_ENRICHED]
@@ -319,7 +403,9 @@ async def food_agent(state: TripState) -> dict:
             far_km=_PROX_FAR_KM,
             top_k=_PROX_TOP_K,
         )
-        cuisine_n = _cuisine_match_score(c.get("cuisine"), cuisine_prefs)
+        cuisine_n = _cuisine_match_score(
+            c.get("cuisine"), cuisine_prefs, name=c.get("name")
+        )
         budget_n = budget_match_score(c.get("price_level"), budget_tier)
 
         composite = (
@@ -350,9 +436,11 @@ async def food_agent(state: TripState) -> dict:
     final = ranked[:cap]
 
     log.info(
-        "food_agent: returning %d restaurants (top score=%.3f, bottom score=%.3f)",
+        "food_agent: returning %d restaurants (top score=%.3f, bottom score=%.3f), "
+        "%d attractions written to state",
         len(final),
         final[0]["score"] if final else 0,
         final[-1]["score"] if final else 0,
+        len(attractions_pool),
     )
-    return {"restaurants": final}
+    return {"restaurants": final, "attractions": attractions_pool}
