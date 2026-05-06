@@ -101,6 +101,33 @@ class RouterOutput(BaseModel):
             "'luxury', 'splurge', '5-star' to 'luxury'."
         ),
     )
+    budget_amount: float | None = Field(
+        default=None,
+        description=(
+            "Absolute budget the user mentioned, as a numeric amount in "
+            "the currency they used. Examples: '1 million COP' → 1000000, "
+            "'2k USD' → 2000, '€500' → 500. Null if the user gave only a "
+            "qualitative tier (e.g. 'cheap', 'luxury') with no number."
+        ),
+    )
+    budget_currency: str | None = Field(
+        default=None,
+        description=(
+            "ISO 4217 currency code matching budget_amount: 'COP', 'USD', "
+            "'EUR', 'MXN', 'BRL', 'GBP', 'JPY', etc. Null if no amount was "
+            "given. Infer from context: 'COP' for Colombian phrasing "
+            "(pesos colombianos), 'USD' for plain $/dollars unless context "
+            "says otherwise."
+        ),
+    )
+    budget_scope: Literal["flights", "trip"] | None = Field(
+        default=None,
+        description=(
+            "What the budget covers: 'flights' if the user said 'flight "
+            "budget' or 'airfare under X', 'trip' for everything (the "
+            "default when scope is unclear). Null if no amount was given."
+        ),
+    )
     preferences: list[str] = Field(
         default_factory=list,
         description=(

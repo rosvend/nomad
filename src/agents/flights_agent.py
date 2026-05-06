@@ -24,6 +24,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from src.agents._priors import (
+    estimate_rt_price_usd,
+    feasibility_verdict,
+    to_usd,
+)
 from src.config import get_llm, get_settings
 from src.state.trip_state import TripState
 from src.tools import search_flights
@@ -93,6 +98,65 @@ _CITY_TO_IATA: dict[str, str] = {
     "cairo": "CAI", "johannesburg": "JNB", "nairobi": "NBO",
     "casablanca": "CMN", "tel aviv": "TLV", "doha": "DOH",
 }
+
+
+# IATA → ISO 3166-1 alpha-2 country code, scoped to the airports we
+# resolve via `_CITY_TO_IATA` (plus a few common LATAM gaps). Used by
+# the budget feasibility check; falls back to None for codes we don't
+# know, which silences the verdict (better than guessing wrong).
+_IATA_TO_COUNTRY: dict[str, str] = {
+    # Asia
+    "HND": "JP", "NRT": "JP", "KIX": "JP", "ITM": "JP",
+    "ICN": "KR", "GMP": "KR",
+    "PEK": "CN", "PVG": "CN", "PKX": "CN", "SHA": "CN",
+    "HKG": "HK", "TPE": "TW",
+    "SIN": "SG", "BKK": "TH", "DMK": "TH",
+    "DXB": "AE", "AUH": "AE", "DOH": "QA",
+    "DEL": "IN", "BOM": "IN",
+    "MNL": "PH", "KUL": "MY", "SGN": "VN", "HAN": "VN",
+    "CGK": "ID", "TLV": "IL",
+    # Europe
+    "LHR": "GB", "LGW": "GB", "STN": "GB",
+    "CDG": "FR", "ORY": "FR",
+    "FCO": "IT", "MXP": "IT",
+    "MAD": "ES", "BCN": "ES",
+    "BER": "DE", "FRA": "DE", "MUC": "DE",
+    "AMS": "NL", "ZRH": "CH", "VIE": "AT",
+    "IST": "TR", "ATH": "GR", "LIS": "PT", "DUB": "IE",
+    "CPH": "DK", "ARN": "SE", "OSL": "NO",
+    "SVO": "RU", "WAW": "PL", "PRG": "CZ", "BUD": "HU",
+    # North America
+    "JFK": "US", "LGA": "US", "EWR": "US",
+    "LAX": "US", "SFO": "US", "ORD": "US", "MIA": "US",
+    "BOS": "US", "IAD": "US", "DCA": "US", "SEA": "US",
+    "ATL": "US", "DFW": "US", "DEN": "US", "LAS": "US",
+    "IAH": "US", "PHL": "US", "PHX": "US", "JAX": "US",
+    "YYZ": "CA", "YVR": "CA", "YUL": "CA", "YYC": "CA",
+    "MEX": "MX",
+    # South America
+    "GRU": "BR", "GIG": "BR", "BSB": "BR",
+    "EZE": "AR", "AEP": "AR",
+    "LIM": "PE", "SCL": "CL", "UIO": "EC", "GYE": "EC",
+    # Colombia
+    "BOG": "CO", "MDE": "CO", "CTG": "CO", "CLO": "CO",
+    "BAQ": "CO", "SMR": "CO", "PEI": "CO", "BGA": "CO",
+    "ADZ": "CO", "AXM": "CO", "MTR": "CO", "VUP": "CO",
+    "RCH": "CO", "CUC": "CO", "PSO": "CO", "IBE": "CO",
+    "LET": "CO", "MZL": "CO", "NVA": "CO",
+    # Central America & Caribbean
+    "PTY": "PA", "SJO": "CR", "TGU": "HN", "GUA": "GT",
+    "SAL": "SV", "MGA": "NI", "HAV": "CU",
+    # Oceania
+    "SYD": "AU", "MEL": "AU", "BNE": "AU", "AKL": "NZ",
+    # Africa
+    "CAI": "EG", "JNB": "ZA", "NBO": "KE", "CMN": "MA",
+}
+
+
+def _country_for_iata(code: str | None) -> str | None:
+    if not code:
+        return None
+    return _IATA_TO_COUNTRY.get(code.upper())
 
 
 # ── IATA resolution ──────────────────────────────────────────────────
@@ -289,6 +353,41 @@ async def flights_agent(state: TripState) -> dict:
         origin_iata, dest_iata, depart_date, return_date, travelers, budget_tier,
     )
 
+    # Budget feasibility — compute *before* the API call so the verdict
+    # surfaces even if search_flights returns no results. Per product
+    # decision, we always proceed with the search and only warn the user;
+    # we never block the API on a feasibility failure.
+    budget_amount = state.get("budget_amount")
+    budget_currency = state.get("budget_currency")
+    budget_scope = state.get("budget_scope") or "trip"
+    budget_assessment: dict[str, Any] | None = None
+    if budget_amount and budget_currency:
+        budget_usd = to_usd(float(budget_amount), budget_currency)
+        prior = estimate_rt_price_usd(
+            _country_for_iata(origin_iata),
+            _country_for_iata(dest_iata),
+        )
+        verdict = feasibility_verdict(budget_usd, prior)
+        budget_assessment = {
+            "verdict": verdict,
+            "budget_amount": float(budget_amount),
+            "budget_currency": budget_currency.upper(),
+            "budget_usd": round(budget_usd, 2) if budget_usd is not None else None,
+            "prior_usd_low": prior[0] if prior else None,
+            "prior_usd_high": prior[1] if prior else None,
+            "scope": budget_scope,
+            "origin_country": _country_for_iata(origin_iata),
+            "dest_country": _country_for_iata(dest_iata),
+        }
+        log.info(
+            "flights: budget verdict=%s (budget=%.0f %s ≈ $%s USD vs prior $%s-$%s)",
+            verdict,
+            float(budget_amount), budget_currency.upper(),
+            f"{budget_usd:.0f}" if budget_usd is not None else "?",
+            prior[0] if prior else "?",
+            prior[1] if prior else "?",
+        )
+
     # Step 2 — call the tool. Fli is async-wrapped via to_thread; SerpApi is
     # the fallback and only kicks in if Fli fails AND SERPAPI_API_KEY is set.
     res = await search_flights.ainvoke({
@@ -301,17 +400,23 @@ async def flights_agent(state: TripState) -> dict:
     })
 
     if not res["ok"]:
-        return {
+        out_err: dict[str, Any] = {
             "errors": [{"agent": "flights", "stage": "search_flights", "details": res}],
             "flights": [],
         }
+        if budget_assessment is not None:
+            out_err["budget_assessment"] = budget_assessment
+        return out_err
 
     raw: list[dict[str, Any]] = list(res["data"])
     if not raw:
-        return {
+        out_empty: dict[str, Any] = {
             "errors": [{"agent": "flights", "stage": "search_flights", "message": "no flights returned"}],
             "flights": [],
         }
+        if budget_assessment is not None:
+            out_empty["budget_assessment"] = budget_assessment
+        return out_empty
 
     # Fli's round-trip search returns many (outbound, return) combinations
     # that share the same outbound flight. Once normalized, those collapse
@@ -370,4 +475,21 @@ async def flights_agent(state: TripState) -> dict:
         final[0]["score"] if final else 0,
         budget_tier, w_price, w_stops, w_duration,
     )
-    return {"flights": final}
+    out: dict[str, Any] = {"flights": final}
+    if budget_assessment is not None:
+        # Record the cheapest realised price alongside the prior so the
+        # renderer can show "your budget is X, prior was $A-$B, cheapest
+        # fare we actually found was Y". We don't auto-downgrade the
+        # verdict here because the flight's native currency may differ
+        # from the user's budget currency, and FX-converting per row
+        # belongs in the renderer where formatting decisions live.
+        cheapest = min(
+            (f.get("price") for f in final
+             if isinstance(f.get("price"), (int, float)) and f["price"] > 0),
+            default=None,
+        )
+        if cheapest is not None and final:
+            budget_assessment["cheapest_found"] = cheapest
+            budget_assessment["cheapest_found_currency"] = final[0].get("currency")
+        out["budget_assessment"] = budget_assessment
+    return out

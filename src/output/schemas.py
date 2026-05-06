@@ -125,6 +125,27 @@ class LegPlan(BaseModel):
     logistics: list[LogisticsLeg] = Field(default_factory=list)
 
 
+class BudgetAssessment(BaseModel):
+    """Outcome of the flight-agent's budget feasibility check.
+
+    Set when the user mentioned an absolute budget (amount + currency).
+    The renderer surfaces a colored warning panel when verdict is not
+    "ok"; nothing is shown when verdict is "ok".
+    """
+
+    verdict: Literal["ok", "tight", "infeasible"] = "ok"
+    budget_amount: float | None = None
+    budget_currency: str | None = None  # ISO 4217
+    budget_usd: float | None = None     # converted via static FX table
+    prior_usd_low: int | None = None    # typical RT economy low end
+    prior_usd_high: int | None = None
+    scope: Literal["flights", "trip"] | None = None
+    origin_country: str | None = None   # ISO 3166-1 alpha-2
+    dest_country: str | None = None
+    cheapest_found: float | None = None  # cheapest realised fare in flight's native currency
+    cheapest_found_currency: str | None = None
+
+
 class TravelPlan(BaseModel):
     """The final structured artifact returned to the user."""
 
@@ -132,6 +153,7 @@ class TravelPlan(BaseModel):
     dates: dict[str, str] | None = None
     travelers: int = 1
     budget_tier: str | None = None
+    budget_assessment: BudgetAssessment | None = None
     user_lodging: str | None = None  # Set when the user told us where they're staying
 
     flights: list[Flight] = Field(default_factory=list)

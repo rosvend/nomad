@@ -1896,6 +1896,7 @@ dependencies = [
     { name = "langgraph-cli", extra = ["inmem"] },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
+    { name = "rich" },
 ]
 
 [package.metadata]
@@ -1911,6 +1912,7 @@ requires-dist = [
     { name = "langgraph-cli", extras = ["inmem"], specifier = ">=0.4.24" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "rich", specifier = ">=13.7" },
 ]
 
 [[package]]

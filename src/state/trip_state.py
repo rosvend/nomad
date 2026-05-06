@@ -24,6 +24,16 @@ class TripState(TypedDict, total=False):
     dates: dict[str, str] | None  # mirrors legs[0] window for back-compat
     travelers: int | None
     budget_tier: str | None  # "budget" | "mid" | "luxury"
+    # Optional absolute budget. When the user mentions a number ("1 million
+    # COP", "2000 USD"), the router populates these so the flights agent
+    # can compare against per-route price priors and surface a feasibility
+    # verdict. None means "no absolute budget given — use tier only".
+    budget_amount: float | None
+    budget_currency: str | None  # ISO 4217, e.g. "COP", "USD", "EUR"
+    budget_scope: str | None     # "flights" | "trip" | None (defaults to "trip")
+    # Verdict written by the flights agent: "ok" | "tight" | "infeasible".
+    # Surfaced in the rendered output as a warning banner when not "ok".
+    budget_assessment: dict[str, Any] | None
     preferences: list[str]  # ["vegetarian", "museums", "no-redeye", ...]
     user_lodging: str | None  # Router writes when user said "I'm staying at <X>";
                               # Hotel agent skips search and Logistics uses it as

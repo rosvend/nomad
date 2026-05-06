@@ -91,7 +91,7 @@ def cache_stats() -> dict[str, int]:
 PLACES_BASE = "https://maps.googleapis.com/maps/api/place"
 DETAILS_FIELDS = (
     "name,rating,user_ratings_total,reviews,price_level,"
-    "formatted_address,website,opening_hours,url"
+    "formatted_address,website,opening_hours,url,types"
 )
 
 
@@ -203,6 +203,11 @@ def _normalize_details(result: dict[str, Any], place_id: str) -> dict[str, Any]:
         "website": result.get("website"),
         "google_url": result.get("url"),
         "price_level": result.get("price_level"),
+        # Google Place types — used downstream to filter venues whose
+        # OSM tags don't reveal their true classification (e.g. a
+        # tourism=hotel tagged building that Google has typed as
+        # "motel").
+        "google_types": result.get("types") or [],
         "open_now": (result.get("opening_hours") or {}).get("open_now"),
         "weekday_hours": (result.get("opening_hours") or {}).get("weekday_text") or [],
         "reviews": [

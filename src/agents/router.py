@@ -106,6 +106,21 @@ Lowercase month names and ordinal day numbers (1st, 2nd, 27th) are
 common — handle them all. If the user gave no temporal hint at all, set
 dates to null.
 
+BUDGET AMOUNT
+If the user mentioned a numeric budget, extract it into `budget_amount`
+(the number alone, in major units) and `budget_currency` (ISO 4217 code).
+Examples:
+- "1 million COP"          → budget_amount=1000000, budget_currency="COP"
+- "1,000,000 pesos"        → budget_amount=1000000, budget_currency="COP"
+- "2k USD"                 → budget_amount=2000, budget_currency="USD"
+- "$2000"                  → budget_amount=2000, budget_currency="USD"
+- "presupuesto de 3 millones de pesos"
+                           → budget_amount=3000000, budget_currency="COP"
+- "trip under €1500"       → budget_amount=1500, budget_currency="EUR"
+Set `budget_scope` to "flights" if the budget specifically refers to
+airfare ("flight budget", "airfare under X"), or "trip" otherwise. Leave
+all three fields null when no number was mentioned.
+
 PREFERENCES
 Free-form list of interests, dietary restrictions, cuisines, etc. extracted
 from the request (e.g. ["vegetarian", "museums", "ramen"]). If no
@@ -155,6 +170,119 @@ _DATE_RE = re.compile(
 # "3-day", "5 day", "3day" — duration without an anchor date.
 _DURATION_RE = re.compile(r"\b(\d+)[-\s]?day\b", re.IGNORECASE)
 
+# Budget amount + currency. Captures patterns like:
+#   "1,000,000 COP", "1.5M COP", "2k USD", "$2000", "€500",
+#   "3 millones de pesos", "presupuesto de 1 millón cop"
+# Returns the lexical pieces; downstream code normalises into a number +
+# ISO currency code.
+#
+# Number token: either thousand-separated (1,000 / 1.000.000 / 1,234,567)
+# or a plain digit run, optionally with a decimal tail. The two alternatives
+# are ordered to prefer the longest match.
+_NUMBER_TOKEN = (
+    r"(\d{1,3}(?:[\.,]\d{3})+(?:[\.,]\d+)?"   # 1,000  | 1.000.000  | 1,234.5
+    r"|\d+(?:[\.,]\d+)?)"                       # 2000   | 2000.5
+)
+_MULTIPLIER = r"(?:\s*(k|m|mm|millones|millon(?:es)?|millón|million|mil)\b)?"
+# Allow stop-word filler (de, of, en) between multiplier and the currency
+# word, since users naturally say "3 millones DE pesos" / "1 million OF
+# dollars". Kept short to avoid over-matching.
+_CURRENCY_FILLER = r"(?:\s+(?:de|del|en|of))?"
+_CURRENCY_WORD = (
+    r"(cop|usd|eur|gbp|jpy|mxn|brl|ars|clp|pen|"
+    r"pesos\s*colombianos|pesos|peso|euros?|euro|dollars?|dollar|"
+    r"d[oó]lares|d[oó]lar|reales|reais|real|yen|libras|sterling)"
+)
+_BUDGET_RE = re.compile(
+    rf"(?:budget|presupuesto|under|menos\s+de|less\s+than|hasta|up\s+to|"
+    rf"around|cerca\s+de|about|approximately|por)?\s*"
+    rf"(?:[\$€£¥]\s*)?{_NUMBER_TOKEN}{_MULTIPLIER}{_CURRENCY_FILLER}\s+{_CURRENCY_WORD}\b",
+    re.IGNORECASE,
+)
+# Plain "$2000" / "€500" with no trailing currency word.
+_BUDGET_SYMBOL_RE = re.compile(
+    rf"([\$€£¥])\s*{_NUMBER_TOKEN}{_MULTIPLIER}",
+)
+_SYMBOL_TO_ISO: dict[str, str] = {
+    "$": "USD", "€": "EUR", "£": "GBP", "¥": "JPY",
+}
+_WORD_TO_ISO: dict[str, str] = {
+    "cop": "COP", "usd": "USD", "eur": "EUR", "gbp": "GBP", "jpy": "JPY",
+    "mxn": "MXN", "brl": "BRL", "ars": "ARS", "clp": "CLP", "pen": "PEN",
+    "pesos colombianos": "COP",
+    "pesos": "COP",  # Colombian project default; users mention COP most often
+    "peso": "COP",
+    "euro": "EUR", "euros": "EUR",
+    "dollar": "USD", "dollars": "USD",
+    "dolar": "USD", "dolares": "USD", "dólar": "USD", "dólares": "USD",
+    "real": "BRL", "reales": "BRL", "reais": "BRL",
+    "yen": "JPY",
+    "libras": "GBP", "sterling": "GBP",
+}
+
+
+def _normalize_budget_amount(num_str: str, multiplier: str | None) -> float | None:
+    """Convert "1,000,000" / "1.5M" / "2k" → a float in major currency units."""
+    s = num_str.strip().lower()
+    # Decide the decimal separator. Latin-American numeric notation uses
+    # "." as thousands separator and "," as decimal; English uses the
+    # opposite. Heuristic: the LAST separator is the decimal one if the
+    # group after it is 1–2 digits long; otherwise both separators are
+    # treated as thousands.
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        # Single comma — decimal if 1-2 trailing digits, else thousands.
+        tail = s.rsplit(",", 1)[1]
+        if len(tail) <= 2:
+            s = s.replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "." in s:
+        tail = s.rsplit(".", 1)[1]
+        if len(tail) > 2:
+            s = s.replace(".", "")
+    try:
+        amount = float(s)
+    except ValueError:
+        return None
+    mult = (multiplier or "").lower().strip()
+    if mult in {"k", "mil"}:
+        amount *= 1_000
+    elif mult in {"m", "mm", "million", "millon", "millones", "millón"}:
+        amount *= 1_000_000
+    return amount
+
+
+def _extract_budget(raw_query: str) -> tuple[float | None, str | None]:
+    """Best-effort: find one (amount, ISO currency) pair in the query.
+
+    Returns (None, None) when nothing is extractable. Used as a backfill
+    when the router LLM didn't populate budget_amount itself.
+    """
+    m = _BUDGET_RE.search(raw_query)
+    if m:
+        amount = _normalize_budget_amount(m.group(1), m.group(2))
+        if amount is None:
+            return None, None
+        cur_word = (m.group(3) or "").strip().lower()
+        cur_word = " ".join(cur_word.split())
+        iso = _WORD_TO_ISO.get(cur_word)
+        if iso:
+            return amount, iso
+    m2 = _BUDGET_SYMBOL_RE.search(raw_query)
+    if m2:
+        amount = _normalize_budget_amount(m2.group(2), m2.group(3))
+        if amount is None:
+            return None, None
+        iso = _SYMBOL_TO_ISO.get(m2.group(1))
+        if iso:
+            return amount, iso
+    return None, None
+
 
 def _parse_date_phrases(raw_query: str, today: date) -> list[date]:
     """Extract and parse all date-like substrings from the query."""
@@ -193,6 +321,14 @@ def _regex_backfill(raw_query: str, parsed: RouterOutput) -> RouterOutput:
             if parsed.destination is None and dest_match:
                 parsed.destination = dest_match
 
+    # Budget amount/currency. Backfill only — never overwrite the LLM.
+    if parsed.budget_amount is None or parsed.budget_currency is None:
+        amount, currency = _extract_budget(raw_query)
+        if parsed.budget_amount is None and amount is not None:
+            parsed.budget_amount = amount
+        if parsed.budget_currency is None and currency is not None:
+            parsed.budget_currency = currency
+
     # Dates
     if parsed.dates is None:
         dates = _parse_date_phrases(raw_query, today)
@@ -208,6 +344,22 @@ def _regex_backfill(raw_query: str, parsed: RouterOutput) -> RouterOutput:
                 end = dates[0] + timedelta(days=max(0, n - 1))
                 parsed.dates = {
                     "start": dates[0].isoformat(),
+                    "end": end.isoformat(),
+                }
+        else:
+            # No explicit date phrase. The prompt asks the LLM to infer
+            # "today + 14 days" as the anchor when only a duration is
+            # given ("7-day trip", "5 day getaway"); both Ollama and the
+            # OpenAI models routinely ignore that rule, so we enforce it
+            # here as a deterministic fallback. This is what unblocks the
+            # flights agent for queries like "plan a 7 day trip to X".
+            dur_m = _DURATION_RE.search(raw_query)
+            if dur_m:
+                n = max(1, int(dur_m.group(1)))
+                start = today + timedelta(days=14)
+                end = start + timedelta(days=max(0, n - 1))
+                parsed.dates = {
+                    "start": start.isoformat(),
                     "end": end.isoformat(),
                 }
 
@@ -229,6 +381,9 @@ def _defaults_from(state: TripState) -> dict:
         "dates": state.get("dates"),
         "travelers": state.get("travelers") or 1,
         "budget_tier": state.get("budget_tier") or "mid",
+        "budget_amount": state.get("budget_amount"),
+        "budget_currency": state.get("budget_currency"),
+        "budget_scope": state.get("budget_scope"),
         "preferences": state.get("preferences") or [],
         "user_lodging": state.get("user_lodging"),
         "legs": legs,
@@ -329,6 +484,9 @@ def _merge_with_state(parsed: RouterOutput, state: TripState) -> dict:
         "dates": state.get("dates") or parsed.dates,
         "travelers": state.get("travelers") or parsed.travelers,
         "budget_tier": state.get("budget_tier") or parsed.budget_tier,
+        "budget_amount": state.get("budget_amount") or parsed.budget_amount,
+        "budget_currency": state.get("budget_currency") or parsed.budget_currency,
+        "budget_scope": state.get("budget_scope") or parsed.budget_scope,
         "preferences": state.get("preferences") or _clean_preferences(parsed.preferences),
         "user_lodging": state.get("user_lodging") or _clean_user_lodging(parsed.user_lodging),
         "legs": legs,
