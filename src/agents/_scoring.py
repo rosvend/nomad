@@ -10,6 +10,7 @@ Pure functions, no I/O. Safe to import from any agent.
 from __future__ import annotations
 
 import math
+from typing import Any, Callable
 
 # Budget tier → preferred Google `price_level` range (1=$ … 4=$$$$).
 _BUDGET_PRICE_PREFS: dict[str, tuple[int, int]] = {
@@ -57,10 +58,15 @@ def proximity_score(
 
 
 def popularity_score(review_count: int | None) -> float:
-    """Log-scaled: 1 review ≈ 0, 1k+ reviews ≈ 1."""
+    """Log-scaled: 1 review ≈ 0, ~32k reviews → 1.
+
+    Saturation point chosen so well-reviewed niche places (1-2k reviews)
+    don't fully tie with mass-market favourites (10k+), letting the
+    rating component still discriminate between them.
+    """
     if not review_count or review_count <= 0:
         return 0.0
-    return max(0.0, min(1.0, math.log10(review_count) / 3.0))
+    return max(0.0, min(1.0, math.log10(review_count) / 4.5))
 
 
 def budget_match_score(price_level: int | None, budget_tier: str) -> float:
@@ -82,3 +88,50 @@ def rating_score(rating: float | None) -> float:
     if rating is None:
         return 0.5
     return max(0.0, min(1.0, rating / 5.0))
+
+
+def diversify_mmr(
+    items: list[dict[str, Any]],
+    *,
+    k: int,
+    score_key: str,
+    similarity: Callable[[dict[str, Any], dict[str, Any]], float],
+    lambda_: float = 0.7,
+) -> list[dict[str, Any]]:
+    """Greedy Maximal Marginal Relevance over already-scored items.
+
+    At each step pick the candidate that maximises:
+
+        lambda_ * relevance(c) - (1 - lambda_) * max_sim(c, already_picked)
+
+    where `relevance(c) = c[score_key]` and `similarity` returns a value
+    in [0, 1] expressing how redundant two items are (1.0 = essentially
+    duplicates, 0.0 = totally distinct). With `lambda_=1.0` MMR collapses
+    to a plain top-k by score; with `lambda_=0.0` it prioritises diversity
+    above all else. Default 0.7 keeps quality dominant while ensuring the
+    final set spans different cuisines/neighborhoods rather than five
+    near-identical Italian restaurants on the same block.
+
+    Deterministic: ties broken by stable sort on the input order.
+    """
+    if k <= 0 or not items:
+        return []
+    pool = list(items)
+    pool.sort(key=lambda x: x.get(score_key, 0.0), reverse=True)
+    if k >= len(pool) or lambda_ >= 1.0:
+        return pool[:k]
+
+    picked: list[dict[str, Any]] = [pool[0]]
+    remaining = pool[1:]
+    while remaining and len(picked) < k:
+        best_idx = 0
+        best_mmr = -float("inf")
+        for i, cand in enumerate(remaining):
+            rel = float(cand.get(score_key, 0.0))
+            max_sim = max((similarity(cand, p) for p in picked), default=0.0)
+            mmr = lambda_ * rel - (1.0 - lambda_) * max_sim
+            if mmr > best_mmr:
+                best_mmr = mmr
+                best_idx = i
+        picked.append(remaining.pop(best_idx))
+    return picked

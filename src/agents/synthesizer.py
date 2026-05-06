@@ -26,6 +26,7 @@ from pydantic import BaseModel, ValidationError
 from src.agents._itinerary import build_itinerary
 from src.config import get_llm
 from src.output.schemas import (
+    BudgetAssessment,
     Flight,
     Hotel,
     ItineraryStop,
@@ -217,11 +218,22 @@ async def synthesizer_agent(state: TripState) -> dict:
     )
     itinerary, e4 = _validate_list(itinerary_dicts, ItineraryStop, "itinerary")
 
+    # Budget assessment is a dict in state (written by flights_agent);
+    # validate into the typed model so the renderer can rely on shape.
+    raw_assessment = state.get("budget_assessment")
+    budget_assessment_model: BudgetAssessment | None = None
+    if raw_assessment:
+        try:
+            budget_assessment_model = BudgetAssessment.model_validate(raw_assessment)
+        except ValidationError as e:
+            log.warning("synthesizer: dropped invalid budget_assessment: %s", e)
+
     plan = TravelPlan(
         destination=state.get("destination") or "Unknown",
         dates=state.get("dates"),
         travelers=state.get("travelers") or 1,
         budget_tier=state.get("budget_tier"),
+        budget_assessment=budget_assessment_model,
         user_lodging=state.get("user_lodging"),
         flights=flights,
         hotels=hotels,
@@ -236,6 +248,17 @@ async def synthesizer_agent(state: TripState) -> dict:
     # multi-city trips — the orchestrator writes one trip-level summary.
     if state.get("skip_summary"):
         plan.summary = None
+    elif not flights and not hotels and not restaurants:
+        # Empty plan: skip the LLM summary — it will hallucinate cheerful
+        # filler ("Embark on a luxurious adventure...") with nothing to
+        # ground it. Write a concrete diagnostic instead.
+        plan.summary = (
+            f"We couldn't gather enough information to plan a trip to "
+            f"{plan.destination!r}. Likely causes: the destination wasn't "
+            f"recognized, no nearby points of interest, or upstream provider "
+            f"failures. See the Errors section below for specifics, and try "
+            f"re-running with a clearer destination or more preferences."
+        )
     else:
         plan.summary = await _generate_summary(plan, itinerary_dicts, state)
 

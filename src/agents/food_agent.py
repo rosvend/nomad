@@ -35,6 +35,8 @@ from typing import Any
 
 from src.agents._scoring import (
     budget_match_score,
+    diversify_mmr,
+    haversine_km,
     popularity_score,
     proximity_score,
     rating_score,
@@ -47,7 +49,11 @@ log = logging.getLogger(__name__)
 # ── Tunables ─────────────────────────────────────────────────────────
 
 RESTAURANT_RADIUS_M = 2000      # restaurants must be walkable
+RESTAURANT_RADIUS_LODGING_M = 6000  # when user_lodging anchors the search,
+                                    # widen so both the lodging neighborhood
+                                    # and the city centre are covered.
 ATTRACTION_RADIUS_M = 5000      # attractions can be a bit further
+ATTRACTION_RADIUS_LODGING_M = 8000  # same idea — cover lodging + centre.
 MAX_CANDIDATES = 12             # bigger pool than hotels — food has more variety
 MAX_ENRICHED = 6                # cap Places API calls (2 each → 12 quota)
 MIN_RESULTS = 3
@@ -119,6 +125,86 @@ def _extract_cuisine_prefs(prefs: list[str] | None) -> set[str]:
             if term in _CUISINE_VOCAB:
                 out.add(term)
     return out
+
+
+# Stop-words filtered out of the free-form name hint so a preference like
+# "places with outdoor seating" doesn't degenerate into a name regex
+# matching every restaurant called "the". Also strips climate, landscape,
+# vibe, and budget descriptors that describe the *trip* — not what we
+# want to find inside a restaurant's name (e.g. "warm beach weather").
+_NAME_HINT_STOPWORDS: frozenset[str] = frozenset({
+    # grammar
+    "a", "an", "the", "and", "or", "of", "with", "for", "in", "on",
+    "at", "to", "from", "by", "near", "places", "place", "spot",
+    "spots", "good", "nice", "great", "best", "cheap", "expensive",
+    "food", "restaurant", "restaurants", "want", "looking", "find",
+    "some", "any", "very", "really", "no", "not",
+    # climate / weather
+    "warm", "warmth", "hot", "cold", "cool", "chilly", "snowy", "snow",
+    "sunny", "rainy", "tropical", "weather", "climate",
+    # landscape / setting
+    "beach", "beaches", "mountain", "mountains", "lake", "river", "forest",
+    "desert", "island", "city", "rural", "urban", "countryside",
+    # vibe / generic descriptors
+    "quiet", "lively", "romantic", "adventure", "adventurous", "relaxing",
+    "relax", "luxury", "luxurious", "premium", "elegant", "fancy",
+    "budget", "midrange", "mid", "affordable",
+})
+
+
+def _build_name_hint(prefs: list[str] | None, cuisine_prefs: set[str]) -> str | None:
+    """Build an Overpass `name~` regex alternation from user preferences.
+
+    Strategy: take every word in `prefs` that isn't already captured by
+    the cuisine whitelist or the stop-word list, and OR them together.
+    For "rooftop, vegetarian, ramen" with cuisine_prefs={vegetarian, ramen}
+    this yields "rooftop". With nothing left, returns None and the
+    Overpass query stays unfiltered.
+    """
+    if not prefs:
+        return None
+    words: list[str] = []
+    seen: set[str] = set()
+    for raw in prefs:
+        for piece in str(raw).lower().replace(",", " ").replace("/", " ").split():
+            term = piece.strip().replace("-", "_")
+            if not term or len(term) < 3:
+                continue
+            if term in _NAME_HINT_STOPWORDS:
+                continue
+            if term in cuisine_prefs:
+                continue
+            if term in _CUISINE_VOCAB:
+                # Belongs in the cuisine_prefs path even if not chosen by
+                # this user — don't pollute name search with broad terms.
+                continue
+            if term in seen:
+                continue
+            seen.add(term)
+            words.append(term)
+    if not words:
+        return None
+    # Cap at ~4 alternatives so the regex stays small and Overpass-friendly.
+    return "|".join(words[:4])
+
+
+def _restaurant_similarity(a: dict[str, Any], b: dict[str, Any]) -> float:
+    """1.0 if two restaurants are essentially duplicates from a diversity
+    standpoint (same cuisine OR very close geographically); 0.0 otherwise.
+
+    Used by MMR to spread the final picks across distinct cuisines and
+    blocks rather than returning five Italian places on the same street.
+    """
+    cuisines_a = _split_cuisine(a.get("cuisine"))
+    cuisines_b = _split_cuisine(b.get("cuisine"))
+    if cuisines_a and cuisines_b and (cuisines_a & cuisines_b):
+        return 1.0
+    la, lo_a = a.get("lat"), a.get("lon")
+    lb, lo_b = b.get("lat"), b.get("lon")
+    if la is not None and lo_a is not None and lb is not None and lo_b is not None:
+        if haversine_km(la, lo_a, lb, lo_b) <= 0.15:  # ~150 m
+            return 1.0
+    return 0.0
 
 
 def _split_cuisine(cuisine_str: str | None) -> set[str]:
@@ -292,37 +378,115 @@ async def food_agent(state: TripState) -> dict:
         }
 
     budget_tier = state.get("budget_tier") or "mid"
-    cuisine_prefs = _extract_cuisine_prefs(state.get("preferences"))
+    raw_prefs = state.get("preferences")
+    cuisine_prefs = _extract_cuisine_prefs(raw_prefs)
+    name_hint = _build_name_hint(raw_prefs, cuisine_prefs)
+    cuisine_filter = "|".join(sorted(cuisine_prefs)) if cuisine_prefs else None
+    user_lodging = state.get("user_lodging")
     log.info(
-        "food: destination=%r tier=%r cuisine_prefs=%s",
+        "food: destination=%r tier=%r cuisine_prefs=%s name_hint=%s lodging=%r",
         destination, budget_tier, sorted(cuisine_prefs) or "(none)",
+        name_hint, user_lodging,
     )
 
-    # 1 — geocode
-    geo = await geocode.ainvoke({"query": destination})
-    if not geo["ok"]:
-        return {
-            "errors": [{"agent": "food", "stage": "geocode", "details": geo}],
-            "restaurants": [],
-        }
-    lat = geo["data"]["lat"]
-    lon = geo["data"]["lon"]
-    log.info("food: geocoded %r -> (%.4f, %.4f)", destination, lat, lon)
+    # 1 — geocode. Prefer user_lodging when provided so search anchors on
+    # the actual stay; widen radii to still cover the city centre. Anchor
+    # the geocode query to the destination so partial addresses resolve
+    # in the right city.
+    if user_lodging:
+        geo_query = ", ".join(p for p in (user_lodging, destination) if p)
+        geo = await geocode.ainvoke({"query": geo_query})
+        if geo["ok"]:
+            lat = geo["data"]["lat"]
+            lon = geo["data"]["lon"]
+            rest_radius = RESTAURANT_RADIUS_LODGING_M
+            attr_radius = ATTRACTION_RADIUS_LODGING_M
+            log.info(
+                "food: geocoded lodging %r -> (%.4f, %.4f); search r=%dm/%dm",
+                user_lodging, lat, lon, rest_radius, attr_radius,
+            )
+        else:
+            log.warning(
+                "food: lodging geocode failed (%s); falling back to destination centre",
+                geo.get("error_type"),
+            )
+            geo = await geocode.ainvoke({"query": destination})
+            if not geo["ok"]:
+                return {
+                    "errors": [{"agent": "food", "stage": "geocode", "details": geo}],
+                    "restaurants": [],
+                }
+            lat = geo["data"]["lat"]
+            lon = geo["data"]["lon"]
+            rest_radius = RESTAURANT_RADIUS_M
+            attr_radius = ATTRACTION_RADIUS_M
+    else:
+        geo = await geocode.ainvoke({"query": destination})
+        if not geo["ok"]:
+            return {
+                "errors": [{"agent": "food", "stage": "geocode", "details": geo}],
+                "restaurants": [],
+            }
+        lat = geo["data"]["lat"]
+        lon = geo["data"]["lon"]
+        rest_radius = RESTAURANT_RADIUS_M
+        attr_radius = ATTRACTION_RADIUS_M
+        log.info("food: geocoded %r -> (%.4f, %.4f)", destination, lat, lon)
 
-    # 2 — fetch candidates and attractions concurrently
+    # 2 — fetch candidates and attractions concurrently. The Overpass
+    # cuisine filter narrows the pool to the user's preference (e.g.
+    # "burger" → only burger places); name_hint adds free-form keyword
+    # filtering ("rooftop"). Either filter that returns too few hits is
+    # retried without the filter so the pool never starves.
     restaurants_task = search_pois.ainvoke({
         "lat": lat, "lon": lon,
         "category": "restaurant",
-        "radius_m": RESTAURANT_RADIUS_M,
+        "radius_m": rest_radius,
         "limit": MAX_CANDIDATES,
+        "cuisine": cuisine_filter,
+        "name_hint": name_hint,
     })
     attractions_task = search_pois.ainvoke({
         "lat": lat, "lon": lon,
         "category": "attraction",
-        "radius_m": ATTRACTION_RADIUS_M,
+        "radius_m": attr_radius,
         "limit": 15,
     })
     rest_result, attr_result = await asyncio.gather(restaurants_task, attractions_task)
+
+    # First fallback: if a cuisine filter was applied and starved the pool,
+    # retry without it. Better to show non-matching restaurants than nothing.
+    if cuisine_filter and (
+        not rest_result["ok"]
+        or len(rest_result.get("data") or []) < MIN_RESULTS
+    ):
+        log.info(
+            "food: cuisine=%r yielded too few results — retrying without cuisine filter",
+            cuisine_filter,
+        )
+        rest_result = await search_pois.ainvoke({
+            "lat": lat, "lon": lon,
+            "category": "restaurant",
+            "radius_m": rest_radius,
+            "limit": MAX_CANDIDATES,
+            "name_hint": name_hint,
+        })
+
+    # Second fallback: if the name_hint is still cutting too deep, drop it.
+    if name_hint and (
+        not rest_result["ok"]
+        or len(rest_result.get("data") or []) < MIN_RESULTS
+    ):
+        log.info(
+            "food: name_hint=%r yielded too few results — falling back to unfiltered search",
+            name_hint,
+        )
+        rest_result = await search_pois.ainvoke({
+            "lat": lat, "lon": lon,
+            "category": "restaurant",
+            "radius_m": rest_radius,
+            "limit": MAX_CANDIDATES,
+        })
 
     if not rest_result["ok"]:
         return {
@@ -424,8 +588,11 @@ async def food_agent(state: TripState) -> dict:
         }
         ranked.append(_restaurant_dict(c, breakdown, composite))
 
-    # 5 — sort and cap
-    ranked.sort(key=lambda r: r["score"], reverse=True)
+    # 5 — diversify via MMR, then cap. MMR keeps the highest-scored
+    # candidate first, then prefers candidates that aren't in the same
+    # cuisine bucket or within 150 m of one already picked. Deterministic
+    # for identical inputs; produces noticeable variety for typical real
+    # candidate pools.
     if len(ranked) < MIN_RESULTS:
         log.warning(
             "food_agent: only %d restaurants found (target %d)",
@@ -433,7 +600,13 @@ async def food_agent(state: TripState) -> dict:
         )
 
     cap = max(MIN_RESULTS, MAX_ENRICHED)
-    final = ranked[:cap]
+    final = diversify_mmr(
+        ranked,
+        k=cap,
+        score_key="score",
+        similarity=_restaurant_similarity,
+        lambda_=0.7,
+    )
 
     log.info(
         "food_agent: returning %d restaurants (top score=%.3f, bottom score=%.3f), "

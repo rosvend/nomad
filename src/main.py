@@ -27,7 +27,7 @@ from src.agents.flights_agent import _resolve_iata
 from src.agents.router import router_agent
 from src.config import configure_logging, get_settings
 from src.graph.builder import build_graph
-from src.output.formatter import to_markdown
+from src.output.formatter import render_terminal
 from src.output.schemas import Flight, LegPlan, TravelPlan
 from src.tools import search_flights
 
@@ -94,6 +94,9 @@ async def _run_single_leg_keep_summary(
         "dates": _leg_dates(leg),
         "travelers": base_state.get("travelers"),
         "budget_tier": base_state.get("budget_tier"),
+        "budget_amount": base_state.get("budget_amount"),
+        "budget_currency": base_state.get("budget_currency"),
+        "budget_scope": base_state.get("budget_scope"),
         "preferences": base_state.get("preferences") or [],
         "user_lodging": leg.get("lodging"),
         "legs": [leg],
@@ -171,18 +174,46 @@ async def _run(query: str) -> TravelPlan:
     # (leg-local) dates instead of the overall window.
     parsed = await router_agent({"raw_query": query})
 
-    # Step 2: if the router produced no destination but the user did
-    # express preferences, run the destination suggester (interactive).
+    # Step 2: if the router produced no destination, run the destination
+    # suggester (interactive). Pass raw_query so region hints like "asia"
+    # that didn't make it into preferences still reach the suggester.
     has_dest = bool(parsed.get("destination") or (parsed.get("legs") or []))
-    if not has_dest and (parsed.get("preferences") or []):
-        chosen = await destination_suggester_agent(parsed)
+    if not has_dest:
+        chosen = await destination_suggester_agent({**parsed, "raw_query": query})
+        # Drop the now-stale router error before merging the suggester's result.
+        if chosen.get("destination") or chosen.get("legs"):
+            parsed["errors"] = [
+                e for e in (parsed.get("errors") or [])
+                if not (e.get("agent") == "router"
+                        and e.get("stage") == "extract"
+                        and "destination" in (e.get("message") or ""))
+            ]
         parsed = {**parsed, **chosen}
+        has_dest = bool(parsed.get("destination") or (parsed.get("legs") or []))
+
+    # Step 2b: if we *still* have no destination (suggester failed or
+    # returned nothing), short-circuit instead of geocoding "Unknown".
+    if not has_dest:
+        return TravelPlan(
+            destination="(unresolved)",
+            errors=[*(parsed.get("errors") or []), {
+                "agent": "main",
+                "stage": "destination",
+                "message": (
+                    "Could not determine a destination. Please re-run with a "
+                    "city, country, or specific preferences (e.g. 'beach', 'museums')."
+                ),
+            }],
+        )
 
     legs = parsed.get("legs") or []
     user_origin = parsed.get("origin") or settings.default_origin
     base = {
         "travelers": parsed.get("travelers"),
         "budget_tier": parsed.get("budget_tier"),
+        "budget_amount": parsed.get("budget_amount"),
+        "budget_currency": parsed.get("budget_currency"),
+        "budget_scope": parsed.get("budget_scope"),
         "preferences": parsed.get("preferences") or [],
     }
 
@@ -201,6 +232,9 @@ async def _run(query: str) -> TravelPlan:
             "dates": _leg_dates(leg) or parsed.get("dates"),
             "travelers": base["travelers"],
             "budget_tier": base["budget_tier"],
+            "budget_amount": base["budget_amount"],
+            "budget_currency": base["budget_currency"],
+            "budget_scope": base["budget_scope"],
             "preferences": base["preferences"],
             "user_lodging": leg.get("lodging") or parsed.get("user_lodging"),
             "legs": [leg],
@@ -223,6 +257,7 @@ async def _run(query: str) -> TravelPlan:
     all_flights: list[dict[str, Any]] = []
     all_errors: list[dict[str, Any]] = list(parsed.get("errors") or [])
     leg1_summary: str | None = None
+    leg1_budget_assessment = None
 
     for i, leg in enumerate(legs):
         origin_for_leg = user_origin if i == 0 else legs[i - 1]["destination"]
@@ -241,6 +276,7 @@ async def _run(query: str) -> TravelPlan:
         if leg_plan:
             if i == 0:
                 leg1_summary = leg_plan.summary
+                leg1_budget_assessment = leg_plan.budget_assessment
             all_flights.extend(f.model_dump(mode="json") for f in leg_plan.flights)
             all_errors.extend(leg_plan.errors)
             leg_plans.append(_leg_to_legplan(leg, leg_plan))
@@ -307,6 +343,7 @@ async def _run(query: str) -> TravelPlan:
         dates=overall_dates,
         travelers=parsed.get("travelers") or 1,
         budget_tier=parsed.get("budget_tier"),
+        budget_assessment=leg1_budget_assessment,
         user_lodging=parsed.get("user_lodging"),
         flights=flights_models,
         legs=leg_plans,
@@ -322,7 +359,7 @@ def main() -> None:
     configure_logging()
     query = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_QUERY
     plan = asyncio.run(_run(query))
-    print(to_markdown(plan))
+    render_terminal(plan)
 
 
 if __name__ == "__main__":

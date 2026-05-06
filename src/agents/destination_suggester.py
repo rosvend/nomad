@@ -44,7 +44,7 @@ class SuggesterOutput(BaseModel):
 
 _PROMPT = """\
 You are a travel-planning assistant. The user described what kind of
-trip they want without naming a destination. Suggest 2 or 3 specific
+trip they want without naming a specific city. Suggest 2 or 3 concrete
 city-level destinations that fit, ranked best first.
 
 USER PROFILE
@@ -52,14 +52,19 @@ USER PROFILE
 - Travel dates: {dates}
 - Budget tier: {budget_tier}
 - Preferences / interests: {preferences}
+- User said (verbatim): {raw_query}
 - Today's date: {today}
 
 GUIDELINES
 - Pick concrete cities or well-known towns (not regions or countries).
+- If the user named a region or continent (e.g. "Asia", "the Caribbean"),
+  pick cities within that region.
 - Favor destinations within reasonable travel distance from the origin
   unless the user clearly wants a long-haul trip.
 - For climate-related preferences ("warm", "cold", "beach", "snow"),
   consider what the climate is actually like during the user's dates.
+- Match the budget tier — for "luxury" prefer cities with strong premium
+  hotel/dining markets.
 - Each `reason` is ONE sentence — no fluff, no marketing copy. Mention
   the specific feature that matches (beach, museums, cuisine, etc.).
 - Return ONLY a JSON object matching the provided schema.
@@ -107,10 +112,11 @@ async def destination_suggester_agent(state: TripState) -> dict:
     dates = state.get("dates")
     dates_str = f"{dates.get('start')} → {dates.get('end')}" if dates else "(unspecified)"
     budget = state.get("budget_tier") or "mid"
+    raw_query = (state.get("raw_query") or "").strip() or "(not provided)"
 
     log.info(
-        "destination_suggester: prefs=%s origin=%r dates=%s tier=%s",
-        prefs, origin, dates_str, budget,
+        "destination_suggester: prefs=%s origin=%r dates=%s tier=%s raw_query=%r",
+        prefs, origin, dates_str, budget, raw_query,
     )
 
     prompt = _PROMPT.format(
@@ -118,6 +124,7 @@ async def destination_suggester_agent(state: TripState) -> dict:
         dates=dates_str,
         budget_tier=budget,
         preferences=", ".join(prefs) if prefs else "(none)",
+        raw_query=raw_query,
         today=date.today().isoformat(),
     )
 

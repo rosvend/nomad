@@ -49,9 +49,18 @@ PoiCategory = Literal["hotel", "restaurant", "cafe", "attraction", "any"]
 # is OR-ed together inside the Overpass union block so multiple OSM tag
 # values can map onto one user-facing category (e.g. "attraction" covers
 # tourism=attraction|museum|viewpoint).
+#
+# Motels are filtered client-side by hotel_agent._is_motel rather than
+# server-side: a `["name"!~"motel|...",i]` clause forces Overpass into a
+# full scan (negative regex + case-insensitive flag bypass the tag
+# indexes), which reliably blew past the 25 s server timeout / 30 s
+# client timeout and starved every hotel run of results.
 _OVERPASS_SELECTORS: dict[PoiCategory, list[str]] = {
     "hotel": ['["tourism"~"^(hotel|hostel|guest_house|apartment)$"]'],
-    "restaurant": ['["amenity"="restaurant"]'],
+    # Fast-food spots (Burger King, taquerías, etc.) are tagged
+    # `amenity=fast_food`, not `restaurant`, in OSM — include both so a
+    # "burger places" query actually returns burger places.
+    "restaurant": ['["amenity"~"^(restaurant|fast_food)$"]'],
     "cafe": ['["amenity"~"^(cafe|coffee_shop)$"]'],
     "attraction": ['["tourism"~"^(attraction|museum|viewpoint|gallery|artwork)$"]'],
     "any": [
@@ -184,6 +193,18 @@ async def _geocode_impl(query: str) -> ToolResult:
 
 # ── Overpass plumbing ─────────────────────────────────────────────────
 
+def _sanitize_overpass_regex(raw: str) -> str:
+    """Strip characters that would break an Overpass regex literal.
+
+    Overpass regex syntax is roughly POSIX ERE inside double quotes. The
+    characters most likely to slip in from user-supplied free-form text
+    are quote marks (would close the literal early) and backslashes.
+    Pipes are intentionally allowed so callers can pass alternations
+    like "ramen|sushi".
+    """
+    return raw.replace('"', '').replace('\\', '').strip()
+
+
 def _build_overpass_query(
     lat: float,
     lon: float,
@@ -191,13 +212,20 @@ def _build_overpass_query(
     radius_m: int,
     cuisine: str | None,
     limit: int,
+    name_hint: str | None = None,
 ) -> str:
     selectors = _OVERPASS_SELECTORS[category]
     cuisine_filter = f'["cuisine"~"{cuisine}",i]' if cuisine else ""
+    name_filter = ""
+    if name_hint:
+        clean = _sanitize_overpass_regex(name_hint)
+        if clean:
+            name_filter = f'["name"~"{clean}",i]'
 
     body_parts: list[str] = []
     for sel in selectors:
         full = f"{sel}{cuisine_filter}" if category in {"restaurant", "cafe"} else sel
+        full = f"{full}{name_filter}"
         body_parts.append(f"  node{full}(around:{radius_m},{lat},{lon});")
         body_parts.append(f"  way{full}(around:{radius_m},{lat},{lon});")
     body = "\n".join(body_parts)
@@ -248,6 +276,11 @@ def _normalize_overpass(item: dict[str, Any], category: PoiCategory) -> dict[str
         "address": address,
         "cuisine": tags.get("cuisine"),
         "brand": tags.get("brand"),
+        # Raw tag values surfaced for downstream classifiers (e.g. motel
+        # detection wants the literal `tourism` value, not just "hotel"
+        # the category).
+        "tourism": tags.get("tourism"),
+        "amenity": tags.get("amenity"),
         "phone": tags.get("phone") or tags.get("contact:phone"),
         "website": tags.get("website") or tags.get("contact:website"),
         "opening_hours": tags.get("opening_hours"),
@@ -265,8 +298,11 @@ async def _search_pois_impl(
     radius_m: int,
     limit: int,
     cuisine: str | None,
+    name_hint: str | None = None,
 ) -> ToolResult:
-    query = _build_overpass_query(lat, lon, category, radius_m, cuisine, limit)
+    query = _build_overpass_query(
+        lat, lon, category, radius_m, cuisine, limit, name_hint=name_hint,
+    )
 
     async def _call() -> ToolResult:
         async with http_client(timeout=30.0) as client:
@@ -305,6 +341,7 @@ async def search_pois(
     radius_m: int = 1000,
     limit: int = 20,
     cuisine: str | None = None,
+    name_hint: str | None = None,
 ) -> ToolResult:
     """Find POIs near a point via OSM Overpass, filtered by tag category.
 
@@ -315,16 +352,23 @@ async def search_pois(
         limit: max POIs returned.
         cuisine: optional regex to filter restaurants/cafes by cuisine
                  (e.g. "japanese", "italian|french", "ramen").
+        name_hint: optional case-insensitive regex applied to the OSM
+                 `name` tag. Useful for surfacing query-specific results
+                 like "rooftop" or "vegetariano" that aren't captured by
+                 the cuisine tag. Quotes/backslashes are stripped; pipes
+                 are kept so callers may pass alternations.
 
     Returns rich OSM tag data — name (multilingual), address, cuisine,
     brand, opening hours, contact info, accessibility, plus the raw tag
     dict under `tags` for downstream LLM use.
     """
     log.info(
-        "search_pois (%s,%s) cat=%s r=%dm limit=%d cuisine=%s",
-        lat, lon, category, radius_m, limit, cuisine,
+        "search_pois (%s,%s) cat=%s r=%dm limit=%d cuisine=%s name_hint=%s",
+        lat, lon, category, radius_m, limit, cuisine, name_hint,
     )
-    return await _search_pois_impl(lat, lon, category, radius_m, limit, cuisine)
+    return await _search_pois_impl(
+        lat, lon, category, radius_m, limit, cuisine, name_hint=name_hint,
+    )
 
 
 @tool

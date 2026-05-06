@@ -44,9 +44,10 @@ MAX_RESTAURANTS = 3              # cap restaurants in stop list
 MIN_ATTRACTIONS = 6              # floor for attractions in stop list
 ATTRACTION_RADIUS_M = 5000       # how far to look for attractions when we
                                  # have to fetch our own
-DEFAULT_MODE = "walk"            # routing.py recomputes walking duration
-                                 # from distance since OSRM demo only ships
-                                 # the car profile.
+WALK_MAX_KM = 1.5                # straight-line distance under which we
+                                 # suggest walking (~18 min). Beyond this
+                                 # we suggest driving — telling someone to
+                                 # walk 9km across a city is unhelpful.
 
 
 def _attractions_to_visit(num_days: int) -> int:
@@ -202,14 +203,28 @@ def _attractions_from_state(
     ]
 
 
+def _pick_mode(start: dict[str, Any], stop: dict[str, Any]) -> str:
+    """Pick walk or drive based on straight-line distance.
+
+    Tells the user to walk only when it's actually a reasonable walk; for
+    cross-city distances we recommend driving instead. Haversine is a
+    cheap lower bound — the road-network distance is always ≥ this.
+    """
+    d_km = _haversine_km(start["lat"], start["lon"], stop["lat"], stop["lon"])
+    return "walk" if d_km <= WALK_MAX_KM else "drive"
+
+
 async def _route_one_leg(
     start: dict[str, Any],
     stop: dict[str, Any],
-    mode: str,
+    mode: str | None = None,
 ) -> dict[str, Any]:
-    """Compute one walking leg start → stop. Returns a dict matching
-    `LogisticsLeg`. On failure, returns the same shape with no
-    duration/distance and a `notes` line explaining why."""
+    """Compute one leg start → stop in the appropriate mode. Returns a
+    dict matching `LogisticsLeg`. On failure, returns the same shape with
+    no duration/distance and a `notes` line explaining why.
+    """
+    if mode is None:
+        mode = _pick_mode(start, stop)
     res = await get_route.ainvoke({
         "from_lat": start["lat"],
         "from_lon": start["lon"],
@@ -312,8 +327,10 @@ async def logistics_agent(state: TripState) -> dict:
     # (free, no key); each call is independent so concurrency is a
     # straight win. `safe_call` inside the tool ensures failures become
     # error_results, not exceptions.
+    # Mode is decided per-leg by haversine distance: short legs walk,
+    # cross-city legs drive. Avoids "walk 9 km" recommendations.
     legs = await asyncio.gather(
-        *(_route_one_leg(start, stop, DEFAULT_MODE) for stop in all_stops)
+        *(_route_one_leg(start, stop) for stop in all_stops)
     )
 
     # Sort by distance ascending. Failed legs (distance_km=None) sink to

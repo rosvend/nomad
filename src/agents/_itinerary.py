@@ -137,6 +137,7 @@ def build_itinerary(
         is_departure = d == n - 1 and n > 1
 
         if is_arrival:
+            appended_any = False
             if hotel_name:
                 out.append(_stop(
                     name=f"Check in at {hotel_name}",
@@ -145,6 +146,7 @@ def build_itinerary(
                     duration_minutes=60,
                     notes="Arrival day — hotel check-in",
                 ))
+                appended_any = True
             r = _next_rest()
             if r:
                 out.append(_stop(
@@ -154,6 +156,13 @@ def build_itinerary(
                     duration_minutes=90,
                     address=r.get("address"),
                     notes="Dinner",
+                ))
+                appended_any = True
+            if not appended_any:
+                # Without this, Day 1 silently disappears from the
+                # rendered output when both pools are empty.
+                out.append(_free_time_stop(
+                    day, _ts(d, 10, 0), "Arrival day — settle in"
                 ))
             continue
 
